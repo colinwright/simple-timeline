@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+Desktop.ini
+Thumbs.db
+
+# Xcode
+build/
+DerivedData/
+*.xcscheme
+*.xcodeproj/project.xcworkspace/xcshareddata/xcschemes/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserdatad/
+*.xcworkspace/
+xcuserdata/
+*.moved-aside
+
+# Swift Package Manager
+.swiftpm/
+Packages/
+*.swiftdoc
+*.swiftmodule
+*.resolved
+*Package.pins
+
+# Carthage
+Carthage/Build
+Carthage/Checkouts
+
+# CocoaPods
+Pods/
+
+# User-specific files
+*.xcuserstate

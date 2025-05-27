@@ -1,69 +1,131 @@
-//
-//  ContentView.swift
-//  SimpleTimeline
-//
-//  Created by Colin Wright on 5/26/25.
-//
-
 import SwiftUI
 import CoreData
+
+// Updated Enum for programmatic tab selection
+enum ProjectDetailTab {
+    case events, characters, arcs, timeline // Reordered
+}
 
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var viewContext
 
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
+        sortDescriptors: [NSSortDescriptor(keyPath: \ProjectItem.creationDate, ascending: true)],
         animation: .default)
-    private var items: FetchedResults<Item>
+    private var projects: FetchedResults<ProjectItem>
+
+    // Selected project state
+    @State private var selectedProject: ProjectItem?
+    
+    // Optional: State for programmatic tab selection
+    // @State private var selectedDetailTab: ProjectDetailTab = .events
 
     var body: some View {
         NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
-                    }
+            // Sidebar List
+            List(selection: $selectedProject) {
+                ForEach(projects) { project in
+                    Text(project.title ?? "Untitled Project")
+                        .tag(project)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                deleteProject(project)
+                            } label: {
+                                Label("Delete Project", systemImage: "trash")
+                            }
+                        }
                 }
-                .onDelete(perform: deleteItems)
+                .onDelete(perform: deleteProjectsFromOffsets)
             }
+            .listStyle(SidebarListStyle())
             .toolbar {
                 ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                    Button(action: addProject) {
+                        Label("Add Project", systemImage: "plus")
                     }
                 }
             }
-            Text("Select an item")
+            // Detail View Area
+            if let project = selectedProject {
+                TabView { // To use programmatic selection: TabView(selection: $selectedDetailTab)
+                    EventListView(project: project)
+                        .tabItem {
+                            Label("Events", systemImage: "list.star")
+                        }
+                        .tag(ProjectDetailTab.events)
+
+                    CharacterListView(project: project)
+                        .tabItem {
+                            Label("Characters", systemImage: "person.3.fill")
+                        }
+                        .tag(ProjectDetailTab.characters)
+                    
+                    CharacterArcListView(project: project) // Moved Arcs before Timeline
+                        .tabItem {
+                            Label("Arcs", systemImage: "arrow.triangle.branch")
+                        }
+                        .tag(ProjectDetailTab.arcs)
+
+                    TimelineView(project: project)
+                        .tabItem {
+                            Label("Timeline", systemImage: "chart.bar.xaxis")
+                        }
+                        .tag(ProjectDetailTab.timeline)
+                }
+            } else {
+                Text("Select a project to see its details.")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
-    private func addItem() {
+    private func addProject() {
         withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
+            let newProject = ProjectItem(context: viewContext)
+            newProject.id = UUID()
+            newProject.creationDate = Date()
+            newProject.title = "New Project \(projects.count + 1)"
+            
+            selectedProject = newProject
+            
             do {
                 try viewContext.save()
             } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
                 let nsError = error as NSError
                 fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
             }
         }
     }
 
-    private func deleteItems(offsets: IndexSet) {
+    private func deleteProjectsFromOffsets(offsets: IndexSet) {
         withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
+            let projectsToDelete = offsets.map { projects[$0] }
+            
+            if let currentSelection = selectedProject, projectsToDelete.contains(currentSelection) {
+                selectedProject = nil
+            }
+            
+            projectsToDelete.forEach(viewContext.delete)
 
             do {
                 try viewContext.save()
             } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
+                let nsError = error as NSError
+                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+            }
+        }
+    }
+    
+    private func deleteProject(_ project: ProjectItem) {
+        withAnimation {
+            if selectedProject == project {
+                selectedProject = nil
+            }
+            viewContext.delete(project)
+
+            do {
+                try viewContext.save()
+            } catch {
                 let nsError = error as NSError
                 fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
             }
@@ -71,13 +133,8 @@ struct ContentView: View {
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
-
-#Preview {
-    ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+    }
 }
