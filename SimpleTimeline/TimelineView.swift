@@ -1,11 +1,10 @@
 import SwiftUI
 import CoreData
 
-// Ensure Color extensions are accessible (e.g., in Color+Extensions.swift)
-
 struct TimelineView: View {
     @ObservedObject var project: ProjectItem
     @Environment(\.managedObjectContext) private var viewContext
+    @Binding var selection: MainViewSelection
 
     // Fetched Results
     @FetchRequest private var events: FetchedResults<EventItem>
@@ -13,14 +12,13 @@ struct TimelineView: View {
     @FetchRequest private var characterArcs: FetchedResults<CharacterArcItem>
 
     // Timeline drawing constants
-    private let eventHeight: CGFloat = 20
+    private let eventBlockBaseHeight: CGFloat = 50
     private let arcHeight: CGFloat = 10
     private let peakIndicatorHeight: CGFloat = 14
-    private let eventSpacing: CGFloat = 5
     private let horizontalPadding: CGFloat = 20
     private let characterLaneHeaderWidth: CGFloat = 150
     private let laneHeight: CGFloat = 40
-    private let instantaneousEventWidth: CGFloat = 8
+    private let instantaneousEventWidth: CGFloat = 10
     private let topOffsetForTimeAxis: CGFloat = 50
     private let detailPanelWidth: CGFloat = 280
 
@@ -37,12 +35,12 @@ struct TimelineView: View {
     @State private var selectedEventForDetail: EventItem?
     @State private var selectedArcForDetail: CharacterArcItem?
     
-    // State to manage the event being actively dragged
     @State private var activelyDraggingEventID: UUID?
     @State private var originalDateForDraggedEvent: Date?
 
-    init(project: ProjectItem) {
+    init(project: ProjectItem, selection: Binding<MainViewSelection>) {
         _project = ObservedObject(initialValue: project)
+        _selection = selection
         
         let projectPredicate = NSPredicate(format: "project == %@", project)
         
@@ -65,6 +63,135 @@ struct TimelineView: View {
         )
     }
 
+    var body: some View {
+        HStack(spacing: 0) {
+            timelinePanel
+            if selectedEventForDetail != nil || selectedArcForDetail != nil {
+                TimelineItemDetailView(
+                    project: project,
+                    selectedEvent: $selectedEventForDetail,
+                    selectedArc: $selectedArcForDetail,
+                    provisionalEventDateOverride: (selectedEventForDetail?.id == activelyDraggingEventID ? selectedEventForDetail?.eventDate : nil)
+                )
+                .frame(width: detailPanelWidth)
+                .layoutPriority(1)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: selectedEventForDetail != nil || selectedArcForDetail != nil)
+            }
+        }
+    }
+
+    private var timelinePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            DetailViewHeader {
+                BreadcrumbView(
+                    projectTitle: project.title ?? "Untitled Project",
+                    currentViewName: "Timeline",
+                    isProjectTitleClickable: true,
+                    projectHomeAction: { selection = .projectHome }
+                )
+            } trailing: {
+                // --- MODIFIED HEADER BUTTONS ---
+                HStack {
+                    Button {
+                        addNewEvent() // Action to add a new event
+                    } label: {
+                        Label("Add Event", systemImage: "plus.circle.fill")
+                            .labelStyle(.iconOnly) // Icon only
+                    }
+                    .help("Add New Event") // Tooltip
+
+                    Button {
+                        withAnimation(.easeInOut) {
+                            currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor)
+                        }
+                    } label: {
+                        Label("Zoom In", systemImage: "plus.magnifyingglass")
+                            .labelStyle(.iconOnly) // Icon only
+                    }
+                    .keyboardShortcut("+", modifiers: .command)
+                    .help("Zoom In")
+
+
+                    Button {
+                         withAnimation(.easeInOut) {
+                            currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor)
+                        }
+                    } label: {
+                        Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                            .labelStyle(.iconOnly) // Icon only
+                    }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .help("Zoom Out")
+                }
+            }
+            
+            if characters.isEmpty && events.isEmpty && characterArcs.isEmpty {
+                 Text("No data to display on the timeline. Click '+' in the header to add an event.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding()
+            } else if let currentRange = dateRange {
+                GeometryReader { geometry in
+                    timelineScrollableContent(
+                        currentRange: currentRange,
+                        geometry: geometry,
+                        charIndices: buildCharacterIndicesMap()
+                    )
+                }
+            } else {
+                 Text("Add events to see the timeline, or manage characters.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            deselectAllItems()
+        }
+    }
+    
+    // MARK: - Add New Event
+    private func addNewEvent() {
+        withAnimation {
+            // Create a new EventItem instance
+            let newEvent = EventItem(context: viewContext)
+            newEvent.id = UUID()
+            newEvent.title = "New Event" // Default title
+            
+            // Set a default date (e.g., today or middle of current timeline view)
+            if let currentTimelineRange = dateRange {
+                let calendar = Calendar.current
+                if let middleDate = calendar.date(byAdding: .day, value: (calendar.dateComponents([.day], from: currentTimelineRange.start, to: currentTimelineRange.end).day ?? 0) / 2, to: currentTimelineRange.start) {
+                    newEvent.eventDate = middleDate
+                } else {
+                    newEvent.eventDate = currentTimelineRange.start
+                }
+            } else {
+                newEvent.eventDate = Date() // Fallback to today
+            }
+            
+            newEvent.durationDays = 0 // Default duration
+            newEvent.project = self.project // Associate with the current project
+            // Initialize other optional fields as nil or with defaults if desired
+            newEvent.type = ""
+            newEvent.locationName = ""
+            newEvent.eventDescription = ""
+            newEvent.eventColorHex = nil
+
+            // Deselect any currently selected arc
+            self.selectedArcForDetail = nil
+            // Set the new event as the one to be detailed (and thus edited)
+            self.selectedEventForDetail = newEvent
+        }
+    }
+        
+    // ... (Rest of TimelineView.swift: dateRange, buildCharacterIndicesMap, other helpers,
+    //      EventBlockView, CharacterArcView, TimeAxisView, and Previews remain the same
+    //      as the complete version from Fri, May 30 2025 11:51 AM CDT, which fixed the
+    //      EventBlockView display) ...
     // MARK: - Computed Properties for Layout
     private var dateRange: (start: Date, end: Date)? {
         var allDates: [Date] = []
@@ -133,7 +260,6 @@ struct TimelineView: View {
                 self.activelyDraggingEventID = nil
                 self.originalDateForDraggedEvent = nil
             }
-            print("Deselecting all timeline items via background tap.")
         }
     }
     
@@ -154,83 +280,6 @@ struct TimelineView: View {
             }
         }
     }
-
-    // MARK: - Body and Main Subviews
-    var body: some View {
-        HStack(spacing: 0) {
-            timelinePanel
-
-            if selectedEventForDetail != nil || selectedArcForDetail != nil {
-                TimelineItemDetailView(
-                    project: project,
-                    selectedEvent: $selectedEventForDetail,
-                    selectedArc: $selectedArcForDetail,
-                    provisionalEventDateOverride: (selectedEventForDetail?.id == activelyDraggingEventID ? selectedEventForDetail?.eventDate : nil)
-                )
-                .frame(width: detailPanelWidth)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-                .animation(.easeInOut(duration: 0.2), value: selectedEventForDetail != nil || selectedArcForDetail != nil)
-            }
-        }
-    }
-
-    private var timelinePanel: some View {
-        VStack(alignment: .leading) {
-            timelineHeader
-            
-            if characters.isEmpty && events.isEmpty && characterArcs.isEmpty {
-                 Text("No data to display on the timeline.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding()
-            } else if let currentRange = dateRange {
-                GeometryReader { geometry in
-                    timelineScrollableContent(
-                        currentRange: currentRange,
-                        geometry: geometry,
-                        charIndices: buildCharacterIndicesMap()
-                    )
-                }
-            } else {
-                 Text("Add events or characters to see the timeline.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding()
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            deselectAllItems()
-        }
-    }
-
-    private var timelineHeader: some View {
-        HStack {
-            Text("Timeline for: \(project.title ?? "Untitled Project")")
-                .font(.headline)
-            Spacer()
-            Button {
-                withAnimation(.easeInOut) {
-                    currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor)
-                }
-            } label: {
-                Label("Zoom In", systemImage: "plus.magnifyingglass")
-            }
-            .keyboardShortcut("+", modifiers: .command)
-
-            Button {
-                 withAnimation(.easeInOut) {
-                    currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor)
-                }
-            } label: {
-                Label("Zoom Out", systemImage: "minus.magnifyingglass")
-            }
-            .keyboardShortcut("-", modifiers: .command)
-        }
-        .padding([.leading, .top, .trailing])
-    }
-
     // MARK: - Scrollable Content and Layers
     @ViewBuilder
     private func timelineScrollableContent(
@@ -244,17 +293,21 @@ struct TimelineView: View {
         let minPixelsPerDayToFill = (availableWidthForContent > 0 && durationInDaysForRange > 0) ? (availableWidthForContent / durationInDaysForRange) : absoluteMinPixelsPerDay
         let effectivePixelsPerDay = max(currentPixelsPerDay, minPixelsPerDayToFill, absoluteMinPixelsPerDay)
         let actualTimelineContentWidth = calculateTotalTimelineContentWidth(for: currentRange, pixelsPerDayToUse: effectivePixelsPerDay)
-        let totalWidthForZStack = actualTimelineContentWidth + characterLaneHeaderWidth + (horizontalPadding * 2)
+        
+        let totalWidthForZStack = max(geometry.size.width, actualTimelineContentWidth + characterLaneHeaderWidth + (horizontalPadding * 2))
+
 
         ScrollView([.horizontal, .vertical]) {
             ZStack(alignment: .topLeading) {
                 tappableBackgroundLayer(totalWidth: totalWidthForZStack, totalHeight: calculateTotalHeight())
-                characterLaneVisualsLayer(totalWidth: totalWidthForZStack) // Pass charIndices if needed by this layer in future
+                characterLaneVisualsLayer(totalWidth: totalWidthForZStack)
                 eventLayer(currentRange: currentRange, effectivePixelsPerDay: effectivePixelsPerDay, charIndices: charIndices)
                 characterArcLayer(currentRange: currentRange, effectivePixelsPerDay: effectivePixelsPerDay, charIndices: charIndices)
                 timeAxisLayer(currentRange: currentRange, actualTimelineContentWidth: actualTimelineContentWidth, effectivePixelsPerDay: effectivePixelsPerDay)
             }
-            .frame(width: totalWidthForZStack, height: calculateTotalHeight())
+            .frame(minWidth: geometry.size.width, idealWidth: totalWidthForZStack, maxWidth: totalWidthForZStack,
+                   minHeight: calculateTotalHeight(), idealHeight: calculateTotalHeight(), maxHeight: calculateTotalHeight())
+
             .gesture(
                 MagnificationGesture()
                     .updating($magnifyBy) { currentState, gestureState, transaction in
@@ -283,7 +336,7 @@ struct TimelineView: View {
     }
 
     @ViewBuilder
-    private func characterLaneVisualsLayer(totalWidth: CGFloat) -> some View { // Removed charIndices from parameters
+    private func characterLaneVisualsLayer(totalWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(characters.enumerated()), id: \.element.id) { index, character in
                 HStack {
@@ -298,18 +351,15 @@ struct TimelineView: View {
                     Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1).offset(x: characterLaneHeaderWidth)
                 }
             }
-            if !events.isEmpty {
+            if !events.isEmpty || !characterArcs.isEmpty || characters.isEmpty {
                 HStack {
-                     Text(characters.isEmpty ? "Events" : "General Events")
+                     Text(characters.isEmpty && events.filter { $0.participatingCharacters?.count == 0 }.isEmpty ? "Timeline" : "General Events")
                         .font(.caption).padding(5)
                         .frame(width: characterLaneHeaderWidth - 10, height: laneHeight, alignment: .leading)
                         .background((characters.count).isMultiple(of: 2) ? Color.gray.opacity(0.1) : Color.clear)
                     Spacer()
                 }
                 .frame(width: totalWidth, height: laneHeight)
-                if !characters.isEmpty {
-                     Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1).offset(x: characterLaneHeaderWidth)
-                }
             }
         }
         .padding(.top, topOffsetForTimeAxis)
@@ -322,15 +372,15 @@ struct TimelineView: View {
             if let eventDate = event.eventDate {
                 let participatingChars = (event.participatingCharacters as? Set<CharacterItem>) ?? Set()
                 let currentEventXPos = xPosition(for: eventDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-
+                
                 if participatingChars.isEmpty {
                     EventBlockView(
                         event: event, displayCharacter: nil, pixelsPerDay: effectivePixelsPerDay,
                         instantaneousEventWidth: instantaneousEventWidth,
                         currentXPosition: currentEventXPos,
                         timelineStartDate: currentRange.start,
-                        yPosition: findYPositionForEvent(event, onCharacter: nil, charIndices: charIndices),
-                        height: eventHeight,
+                        yPosition: findYPositionForEvent(event, onCharacter: nil, charIndices: charIndices, eventHeight: eventBlockBaseHeight),
+                        height: eventBlockBaseHeight,
                         isSelected: self.selectedEventForDetail?.id == event.id,
                         isBeingActivelyDragged: self.activelyDraggingEventID == event.id,
                         onTap: {
@@ -339,7 +389,6 @@ struct TimelineView: View {
                             self.activelyDraggingEventID = nil; self.originalDateForDraggedEvent = nil
                         },
                         onDragStateChanged: { dragging, originalDate, newDate in
-                            // Corrected argument label: newProvisionalDate instead of provisionalDate
                             handleEventDragStateChange(event: event, isDragging: dragging, originalDragStartDate: originalDate, newProvisionalDate: newDate)
                         }
                     )
@@ -352,8 +401,8 @@ struct TimelineView: View {
                             instantaneousEventWidth: instantaneousEventWidth,
                             currentXPosition: currentEventXPos,
                             timelineStartDate: currentRange.start,
-                            yPosition: findYPositionForEvent(event, onCharacter: character, charIndices: charIndices),
-                            height: eventHeight,
+                            yPosition: findYPositionForEvent(event, onCharacter: character, charIndices: charIndices, eventHeight: eventBlockBaseHeight),
+                            height: eventBlockBaseHeight,
                             isSelected: self.selectedEventForDetail?.id == event.id,
                             isBeingActivelyDragged: self.activelyDraggingEventID == event.id,
                             onTap: {
@@ -362,7 +411,6 @@ struct TimelineView: View {
                                 self.activelyDraggingEventID = nil; self.originalDateForDraggedEvent = nil
                             },
                             onDragStateChanged: { dragging, originalDate, newDate in
-                                // Corrected argument label: newProvisionalDate instead of provisionalDate
                                 handleEventDragStateChange(event: event, isDragging: dragging, originalDragStartDate: originalDate, newProvisionalDate: newDate)
                             }
                         )
@@ -377,21 +425,37 @@ struct TimelineView: View {
     @ViewBuilder
     private func characterArcLayer(currentRange: (start: Date, end: Date), effectivePixelsPerDay: CGFloat, charIndices: [UUID: Int]) -> some View {
         ForEach(characterArcs) { arc in
-            if let char = arc.character, let charID = char.id,let charIndex = charIndices[charID],
+            if let char = arc.character, let charID = char.id, let charIndex = charIndices[charID],
                let startEvent = arc.startEvent, let startDate = startEvent.eventDate,
                let endEventUnwrapped = arc.endEvent, let endDate = endEventUnwrapped.eventDate {
+                
                 let arcStartX = xPosition(for: startDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
                 let endEventActualEndDate = Calendar.current.date(byAdding: .day, value: Int(endEventUnwrapped.durationDays), to: endDate) ?? endDate
                 let arcEndX = xPosition(for: endEventActualEndDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                let peakX: CGFloat? = { if let peakEvent = arc.peakEvent, let peakDate = peakEvent.eventDate {
+                
+                let peakX: CGFloat? = {
+                    if let peakEvent = arc.peakEvent, let peakDate = peakEvent.eventDate {
                         return xPosition(for: peakDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                    } ; return nil }()
+                    }
+                    return nil
+                }()
+                
                 let arcYPosition = topOffsetForTimeAxis + (CGFloat(charIndex) * laneHeight) + (laneHeight * 0.65)
-                CharacterArcView( arc: arc, startX: arcStartX, endX: arcEndX, peakX: peakX,
-                    yPosition: arcYPosition, height: arcHeight, peakIndicatorHeight: peakIndicatorHeight,
+                
+                CharacterArcView(
+                    arc: arc,
+                    startX: arcStartX,
+                    endX: arcEndX,
+                    peakX: peakX,
+                    yPosition: arcYPosition,
+                    height: arcHeight,
+                    peakIndicatorHeight: peakIndicatorHeight,
                     color: Color(hex: char.colorHex ?? "") ?? .purple.opacity(0.7),
                     isSelected: self.selectedArcForDetail?.id == arc.id,
-                    onTap: { self.selectedEventForDetail = nil; self.selectedArcForDetail = (self.selectedArcForDetail?.id == arc.id ? nil : arc) }
+                    onTap: {
+                        self.selectedEventForDetail = nil
+                        self.selectedArcForDetail = (self.selectedArcForDetail?.id == arc.id ? nil : arc)
+                    }
                 ).zIndex(1)
             }
         }
@@ -399,10 +463,17 @@ struct TimelineView: View {
 
     @ViewBuilder
     private func timeAxisLayer(currentRange: (start: Date, end: Date), actualTimelineContentWidth: CGFloat, effectivePixelsPerDay: CGFloat) -> some View {
-        TimeAxisView(startDate: currentRange.start, endDate: currentRange.end,
-                     totalWidth: actualTimelineContentWidth, offsetX: 0, pixelsPerDay: effectivePixelsPerDay)
-            .frame(height: 40).padding(.horizontal, horizontalPadding).offset(x: characterLaneHeaderWidth, y: 10)
-            .zIndex(3)
+        TimeAxisView(
+            startDate: currentRange.start,
+            endDate: currentRange.end,
+            totalWidth: actualTimelineContentWidth,
+            offsetX: 0,
+            pixelsPerDay: effectivePixelsPerDay
+        )
+        .frame(height: 40)
+        .padding(.horizontal, horizontalPadding)
+        .offset(x: characterLaneHeaderWidth, y: 10)
+        .zIndex(3)
     }
     
     private func xPosition(for date: Date, timelineStartDate: Date, currentPixelsPerDay: CGFloat) -> CGFloat {
@@ -411,23 +482,157 @@ struct TimelineView: View {
     }
 
     private func calculateTotalHeight() -> CGFloat {
-        let numberOfVisualLanes = characters.count + (!events.isEmpty ? 1 : 0)
+        let numberOfCharacterLanes = characters.count
+        let generalEventsLanePresent = !events.isEmpty || !characterArcs.isEmpty || characters.isEmpty
+        let numberOfVisualLanes = numberOfCharacterLanes + (generalEventsLanePresent ? 1 : 0)
+        
         let totalLanesHeight = CGFloat(max(1, numberOfVisualLanes)) * laneHeight
         return totalLanesHeight + topOffsetForTimeAxis + 50
     }
     
-    private func findYPositionForEvent(_ event: EventItem, onCharacter character: CharacterItem?, charIndices: [UUID: Int]) -> CGFloat {
-        let eventYOffsetInLane = laneHeight * 0.30
+    private func findYPositionForEvent(_ event: EventItem, onCharacter character: CharacterItem?, charIndices: [UUID: Int], eventHeight: CGFloat) -> CGFloat {
+        let laneCenterY = laneHeight / 2
+        let eventBlockCenterY = eventHeight / 2
+        let yOffsetInLane = laneCenterY - eventBlockCenterY
+        
         if let char = character, let charID = char.id, let charIndex = charIndices[charID] {
-            return topOffsetForTimeAxis + (CGFloat(charIndex) * laneHeight) + eventYOffsetInLane
+            return topOffsetForTimeAxis + (CGFloat(charIndex) * laneHeight) + yOffsetInLane
         } else {
-            return topOffsetForTimeAxis + (CGFloat(characters.count) * laneHeight) + eventYOffsetInLane
+            return topOffsetForTimeAxis + (CGFloat(characters.count) * laneHeight) + yOffsetInLane
+        }
+    }
+} // End of TimelineView struct
+
+// MARK: - Nested EventBlockView (Ensure this is your latest enhanced version)
+struct EventBlockView: View {
+    @ObservedObject var event: EventItem
+    let displayCharacter: CharacterItem?
+    let pixelsPerDay: CGFloat
+    let instantaneousEventWidth: CGFloat
+    let currentXPosition: CGFloat
+    let timelineStartDate: Date
+    let yPosition: CGFloat
+    let height: CGFloat
+    let isSelected: Bool
+    let isBeingActivelyDragged: Bool
+    let onTap: () -> Void
+    let onDragStateChanged: (Bool, Date?, Date?) -> Void
+    
+    @Environment(\.managedObjectContext) private var viewContext
+    @GestureState private var dragTranslation: CGSize = .zero
+    @State private var localIsDragging: Bool = false
+    @State private var originalDateOnDragStart: Date?
+
+    private var eventBackgroundColor: Color {
+        if let hex = event.eventColorHex, let color = Color(hex: hex) {
+            return color
+        }
+        if let char = displayCharacter, let hex = char.colorHex, let color = Color(hex: hex) {
+            return color
+        }
+        return .gray
+    }
+
+    private var shortDescription: String? {
+        guard let desc = event.eventDescription, !desc.isEmpty else { return nil }
+        let lines = desc.components(separatedBy: .newlines) // Changed from split(separator:)
+        return lines.first
+    }
+    
+    private var displayDateFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE d MMM"
+        return formatter
+    }
+
+    var body: some View {
+        let currentEventWidth = calculateEventWidth()
+        let positioningX = currentXPosition + (currentEventWidth / 2) + dragTranslation.width
+
+        VStack(alignment: .leading, spacing: 2) {
+            Text(event.title ?? "Untitled Event")
+                .font(.system(size: 10, weight: .bold))
+                .lineLimit(1)
+            
+            if let date = event.eventDate, currentEventWidth > 40 {
+                Text(displayDateFormatter.string(from: date))
+                    .font(.system(size: 8))
+                    .opacity(0.8)
+            }
+
+            if let shortDesc = shortDescription, currentEventWidth > 60 {
+                Text(shortDesc)
+                    .font(.system(size: 8))
+                    .lineLimit(event.durationDays > 0 ? 2 : 1)
+                    .opacity(0.7)
+            }
+        }
+        .padding(EdgeInsets(top: 4, leading: 5, bottom: 4, trailing: 5))
+        .frame(width: currentEventWidth, height: height, alignment: .topLeading)
+        .background(eventBackgroundColor.opacity(localIsDragging || isBeingActivelyDragged ? 0.7 : 1.0))
+        .foregroundColor(eventBackgroundColor.isLight() ? .black : .white) // Make sure Color+Extensions.isLight() exists
+        .cornerRadius(4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(isSelected ? Color.blue.opacity(0.8) : Color.black.opacity(0.3), lineWidth: isSelected ? 2.5 : 0.7)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .scaleEffect(isSelected ? 1.03 : (localIsDragging || isBeingActivelyDragged ? 1.01 : 1.0))
+        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isSelected || localIsDragging || isBeingActivelyDragged)
+        .position(x: positioningX , y: yPosition)
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    if !localIsDragging {
+                        originalDateOnDragStart = event.eventDate
+                        localIsDragging = true
+                    }
+                    let daysDragged = round(value.translation.width / pixelsPerDay)
+                    if let capturedOriginalDate = originalDateOnDragStart {
+                        let provisionalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: capturedOriginalDate)
+                        self.onDragStateChanged(true, capturedOriginalDate, provisionalNewDate)
+                    }
+                }
+                .updating($dragTranslation) { value, state, _ in
+                    state = value.translation
+                }
+                .onEnded { value in
+                    if let capturedOriginalDate = originalDateOnDragStart {
+                        let daysDragged = round(value.translation.width / pixelsPerDay)
+                        let finalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: capturedOriginalDate)
+                        
+                        DispatchQueue.main.async {
+                            event.eventDate = finalNewDate
+                            do {
+                                if viewContext.hasChanges {
+                                    try viewContext.save()
+                                }
+                            } catch {
+                                let nsError = error as NSError
+                                print("Error saving dragged event: \(nsError), \(nsError.userInfo)")
+                                event.eventDate = capturedOriginalDate
+                            }
+                            self.onDragStateChanged(false, capturedOriginalDate, finalNewDate)
+                        }
+                    }
+                    self.localIsDragging = false
+                    self.originalDateOnDragStart = nil
+                }
+        )
+    }
+    
+    private func calculateEventWidth() -> CGFloat {
+        if event.durationDays == 0 {
+            return instantaneousEventWidth
+        } else {
+            return max(CGFloat(event.durationDays) * pixelsPerDay, instantaneousEventWidth * 2)
         }
     }
 }
 
-// EventBlockView, CharacterArcView, TimeAxisView, and PreviewProvider structs remain the same
-// ... (Ensure these are correctly defined in your file or accessible)
+// MARK: - Other Nested Views (CharacterArcView, TimeAxisView)
+// These are assumed to be the same as your existing versions.
 
 struct CharacterArcView: View {
     @ObservedObject var arc: CharacterArcItem
@@ -459,7 +664,7 @@ struct CharacterArcView: View {
             if arcWidth > 20 {
                 Text(arc.name ?? "Arc")
                     .font(.system(size: 8, weight: .medium))
-                    .foregroundColor(isSelected ? .black : color.darker(by:0.4))
+                    .foregroundColor(isSelected ? .black : (color.isLight() ? color.darker(by: 0.6) : color.darker(by:0.4)))
                     .padding(.horizontal, 2)
                     .lineLimit(1)
                     .frame(maxWidth: arcWidth - 4, alignment: .center)
@@ -472,7 +677,7 @@ struct CharacterArcView: View {
                         path.move(to: CGPoint(x: relativePeakX, y: (height / 2) - (peakIndicatorHeight / 2)))
                         path.addLine(to: CGPoint(x: relativePeakX, y: (height / 2) + (peakIndicatorHeight / 2)))
                     }
-                    .stroke(color.darker(by: 0.3), style: StrokeStyle(lineWidth: 2.5, dash: [2,2]))
+                    .stroke((color.isLight() ? color.darker(by: 0.5) : color.darker(by: 0.3)), style: StrokeStyle(lineWidth: 2.5, dash: [2,2]))
                 }
             }
         }
@@ -485,113 +690,6 @@ struct CharacterArcView: View {
     }
 }
 
-struct EventBlockView: View {
-    @ObservedObject var event: EventItem
-    let displayCharacter: CharacterItem?
-    let pixelsPerDay: CGFloat
-    let instantaneousEventWidth: CGFloat
-    let currentXPosition: CGFloat
-    let timelineStartDate: Date
-    let yPosition: CGFloat
-    let height: CGFloat
-    let isSelected: Bool
-    let isBeingActivelyDragged: Bool
-    let onTap: () -> Void
-    let onDragStateChanged: (Bool, Date?, Date?) -> Void
-    
-    @Environment(\.managedObjectContext) private var viewContext
-
-    @GestureState private var dragTranslation: CGSize = .zero
-    @State private var localIsDragging: Bool = false
-    @State private var originalDateOnDragStart: Date?
-
-    var body: some View {
-        let currentEventWidth = calculateEventWidth()
-        let visualXPosition = currentXPosition + dragTranslation.width
-
-        VStack(alignment: .leading) {
-            Text(event.title ?? "Untitled Event")
-                .font(.system(size: 10))
-                .lineLimit(1)
-                .padding(EdgeInsets(top: 1, leading: 3, bottom: 1, trailing: 3))
-                .frame(width: max(currentEventWidth - 2, 1), height: height - 2)
-                .background(getEventColor().opacity(localIsDragging || isBeingActivelyDragged ? 0.7 : 1.0))
-                .foregroundColor(isSelected ? .black : .white)
-                .cornerRadius(3)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 3)
-                        .stroke(isSelected ? Color.yellow : Color.black.opacity(0.5), lineWidth: isSelected ? 2 : 0.5)
-                )
-        }
-        .frame(width: currentEventWidth, height: height)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .scaleEffect(isSelected ? 1.1 : (localIsDragging || isBeingActivelyDragged ? 1.05 : 1.0))
-        .animation(.spring(), value: isSelected || localIsDragging || isBeingActivelyDragged)
-        .position(x: visualXPosition + (currentEventWidth / 2) , y: yPosition)
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    self.localIsDragging = true
-                    if self.originalDateOnDragStart == nil {
-                        self.originalDateOnDragStart = event.eventDate
-                    }
-                    let daysDragged = round(value.translation.width / pixelsPerDay)
-                    if let originalDate = self.originalDateOnDragStart {
-                        let provisionalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: originalDate)
-                        if event.eventDate != provisionalNewDate {
-                           event.eventDate = provisionalNewDate
-                        }
-                        self.onDragStateChanged(true, self.originalDateOnDragStart, provisionalNewDate)
-                    }
-                }
-                .updating($dragTranslation) { value, state, transaction in
-                    state = value.translation
-                }
-                .onEnded { value in
-                    self.localIsDragging = false
-                    if let originalDate = self.originalDateOnDragStart {
-                        let daysDragged = round(value.translation.width / pixelsPerDay)
-                        let finalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: originalDate)
-                        
-                        DispatchQueue.main.async {
-                            event.eventDate = finalNewDate
-                            do {
-                                if viewContext.hasChanges {
-                                    try viewContext.save()
-                                    print("Event '\(event.title ?? "")' moved to \(finalNewDate?.description ?? "N/A") and saved.")
-                                }
-                            } catch {
-                                let nsError = error as NSError
-                                print("Error saving dragged event: \(nsError), \(nsError.userInfo)")
-                                event.eventDate = originalDate
-                            }
-                            self.onDragStateChanged(false, self.originalDateOnDragStart, finalNewDate)
-                        }
-                    }
-                    self.originalDateOnDragStart = nil
-                }
-        )
-    }
-    
-    private func calculateEventWidth() -> CGFloat {
-        if event.durationDays == 0 {
-            return instantaneousEventWidth
-        } else {
-            return max(CGFloat(event.durationDays) * pixelsPerDay, pixelsPerDay)
-        }
-    }
-    
-    private func getEventColor() -> Color {
-        if let char = displayCharacter, let hex = char.colorHex, let color = Color(hex: hex) {
-            return color
-        }
-        return .gray
-    }
-}
-
-// TimeAxisView and PreviewProvider structs remain the same
-// ...
 struct TimeAxisView: View {
     let startDate: Date
     let endDate: Date
@@ -610,7 +708,7 @@ struct TimeAxisView: View {
     }
 
     private var totalDays: Int {
-        calendar.dateComponents([.day], from: startDate, to: endDate).day ?? 1
+        max(0, calendar.dateComponents([.day], from: startDate, to: endDate).day ?? 0)
     }
 
     var body: some View {
@@ -619,25 +717,30 @@ struct TimeAxisView: View {
                 path.move(to: CGPoint(x: offsetX, y: geometryInternal.size.height / 2))
                 path.addLine(to: CGPoint(x: offsetX + totalWidth, y: geometryInternal.size.height / 2))
 
-                for dayOffset in 0...totalDays {
-                    let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
-                    if xPosInView >= offsetX && xPosInView <= offsetX + totalWidth + (pixelsPerDay / 2) {
-                        path.move(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 - 5))
-                        path.addLine(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 + 5))
+                if totalDays >= 0 {
+                    for dayOffset in 0...totalDays {
+                        let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
+                        if xPosInView >= offsetX && xPosInView <= offsetX + totalWidth + (pixelsPerDay / 2) {
+                            path.move(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 - 5))
+                            path.addLine(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 + 5))
+                        }
                     }
                 }
             }
             .stroke(Color.gray, lineWidth: 1)
 
-            ForEach(0...totalDays, id: \.self) { dayOffset in
-                if let dateForLabel = calendar.date(byAdding: .day, value: dayOffset, to: startDate) {
-                    let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
-                    let labelFrequency = max(1, Int(60 / max(1,pixelsPerDay)))
-                    if dayOffset % labelFrequency == 0 && xPosInView >= offsetX && xPosInView <= offsetX + totalWidth {
-                        Text(dateFormatterForAxis.string(from: dateForLabel))
-                            .font(.caption2)
-                            .position(x: xPosInView, y: geometryInternal.size.height / 2 + 15)
-                            .fixedSize()
+            if totalDays >= 0 {
+                ForEach(0...totalDays, id: \.self) { dayOffset in
+                    if let dateForLabel = calendar.date(byAdding: .day, value: dayOffset, to: startDate) {
+                        let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
+                        let labelFrequency = max(1, Int(80 / max(1,pixelsPerDay)))
+                        
+                        if dayOffset % labelFrequency == 0 && xPosInView >= offsetX && xPosInView <= offsetX + totalWidth {
+                            Text(dateFormatterForAxis.string(from: dateForLabel))
+                                .font(.caption2)
+                                .position(x: xPosInView, y: geometryInternal.size.height / 2 + 15)
+                                .fixedSize()
+                        }
                     }
                 }
             }
@@ -651,34 +754,19 @@ struct TimeAxisView: View {
     }
 }
 
-
 struct TimelineView_Previews: PreviewProvider {
     static var previews: some View {
         let context = PersistenceController.preview.container.viewContext
         let sampleProject = ProjectItem(context: context)
-        sampleProject.title = "Sample Project for Timeline"
-        sampleProject.id = UUID()
-        sampleProject.creationDate = Date()
+        sampleProject.title = "Sample Project"
+        
+        let char1 = CharacterItem(context: context); char1.id = UUID(); char1.name = "Alice"; char1.colorHex = "#E91E63"; char1.project = sampleProject
+        
+        let event1 = EventItem(context: context); event1.id = UUID(); event1.title = "Event 1: Long Title to Test Display"; event1.eventDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()); event1.durationDays = 2; event1.project = sampleProject; event1.eventDescription = "Desc line 1.\nDesc line 2."; event1.eventColorHex = "#3498DB"; event1.addToParticipatingCharacters(char1)
+        let event2 = EventItem(context: context); event2.id = UUID(); event2.title = "Event 2"; event2.eventDate = Calendar.current.date(byAdding: .day, value: 4, to: Date()); event2.durationDays = 0; event2.project = sampleProject;
 
-        let char1 = CharacterItem(context: context); char1.name = "Alice"; char1.colorHex = "#E91E63"; char1.project = sampleProject; char1.id = UUID()
-        let char2 = CharacterItem(context: context); char2.name = "Bob"; char2.colorHex = "#4CAF50"; char2.project = sampleProject; char2.id = UUID()
-        let char3 = CharacterItem(context: context); char3.name = "Charlie"; char3.colorHex = "#FFC107"; char3.project = sampleProject; char3.id = UUID()
-        let today = Date(); let calendar = Calendar.current
-        let eventStart = calendar.date(byAdding: .day, value: 1, to: today)!
-        let eventPeak = calendar.date(byAdding: .day, value: 4, to: today)!
-        let eventEndForArc = calendar.date(byAdding: .day, value: 7, to: today)!
-        let evS = EventItem(context: context); evS.title = "Arc Start"; evS.eventDate = eventStart; evS.durationDays = 0; evS.project = sampleProject; evS.id = UUID()
-        let evP = EventItem(context: context); evP.title = "Arc Peak"; evP.eventDate = eventPeak; evP.durationDays = 1; evP.project = sampleProject; evS.participatingCharacters = NSSet(array: [char1]); evP.id = UUID()
-        let evE = EventItem(context: context); evE.title = "Arc End"; evE.eventDate = eventEndForArc; evE.durationDays = 2; evE.project = sampleProject; evE.id = UUID()
-        let sampleArc = CharacterArcItem(context: context); sampleArc.name = "Alice's Arc"; sampleArc.id = UUID(); sampleArc.creationDate = Date()
-        sampleArc.project = sampleProject; sampleArc.character = char1; sampleArc.startEvent = evS; sampleArc.peakEvent = evP; sampleArc.endEvent = evE
-        let eventOther = EventItem(context: context)
-        eventOther.title="Bob's Task"; eventOther.eventDate=calendar.date(byAdding: .day, value: 2, to: today)!
-        eventOther.durationDays=3; eventOther.project=sampleProject; eventOther.id = UUID()
-        eventOther.participatingCharacters = NSSet(array: [char2])
-
-        return TimelineView(project: sampleProject)
+        return TimelineView(project: sampleProject, selection: .constant(.timeline))
             .environment(\.managedObjectContext, context)
-            .frame(width: 800, height: 500)
+            .frame(width: 800, height: 600)
     }
 }

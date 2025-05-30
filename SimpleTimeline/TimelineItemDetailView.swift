@@ -5,138 +5,321 @@ struct TimelineItemDetailView: View {
     @ObservedObject var project: ProjectItem
     @Binding var selectedEvent: EventItem?
     @Binding var selectedArc: CharacterArcItem?
-    let provisionalEventDateOverride: Date? // New property for live date during drag
+    let provisionalEventDateOverride: Date?
 
     @Environment(\.managedObjectContext) private var viewContext
     
-    @State private var showingEditEventSheet = false
-    @State private var showingEditArcSheet = false
+    @State private var eventColorHexInput: String = ""
+    @State private var eventUIColor: Color = .gray
+    @State private var editableDurationDays: Int = 0
+    @State private var participatingCharacterIDs: Set<UUID> = []
+    @State private var showingDeleteConfirmation = false
+
+    @FetchRequest private var projectCharacters: FetchedResults<CharacterItem>
 
     private var itemFormatter: DateFormatter {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
-        formatter.timeStyle = .short
         return formatter
+    }
+    
+    init(project: ProjectItem, selectedEvent: Binding<EventItem?>, selectedArc: Binding<CharacterArcItem?>, provisionalEventDateOverride: Date?) {
+        self.project = project
+        self._selectedEvent = selectedEvent
+        self._selectedArc = selectedArc
+        self.provisionalEventDateOverride = provisionalEventDateOverride
+        _projectCharacters = FetchRequest<CharacterItem>(
+            sortDescriptors: [NSSortDescriptor(keyPath: \CharacterItem.name, ascending: true)],
+            predicate: NSPredicate(format: "project == %@", project),
+            animation: .default
+        )
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundColor(.gray)
+            .padding(.bottom, -2)
+    }
+
+    private func syncEventDetailsToState() {
+        guard let event = selectedEvent else {
+            eventColorHexInput = ""
+            eventUIColor = .gray
+            participatingCharacterIDs = []
+            editableDurationDays = 0
+            return
+        }
+        
+        eventColorHexInput = event.eventColorHex ?? ""
+        eventUIColor = Color(hex: event.eventColorHex ?? "") ?? .gray
+        editableDurationDays = Int(event.durationDays)
+        
+        if let participants = event.participatingCharacters as? Set<CharacterItem> {
+            participatingCharacterIDs = Set(participants.compactMap { $0.id })
+        } else {
+            participatingCharacterIDs = []
+        }
+    }
+    
+    private func updateEventColorFromPicker(_ newColor: Color) {
+        if let newHex = newColor.toHex() {
+            eventColorHexInput = newHex
+            selectedEvent?.eventColorHex = newHex
+        }
+    }
+
+    private func updateEventColorFromHexInput(_ newHex: String) {
+        let trimmedHex = newHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedHex.isEmpty {
+            selectedEvent?.eventColorHex = nil
+            eventUIColor = .gray
+        } else if let color = Color(hex: trimmedHex) {
+            selectedEvent?.eventColorHex = trimmedHex
+            eventUIColor = color
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack {
-                Spacer()
-                Button {
-                    selectedEvent = nil
-                    selectedArc = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.gray)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 15) {
+                viewHeader
+
+                if selectedEvent != nil {
+                    eventDetailContent
+                } else if let arc = selectedArc {
+                    arcDetailContent(arc: arc)
+                } else {
+                    placeholderContent
                 }
-                .buttonStyle(PlainButtonStyle())
             }
+            .padding()
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(NSColor.controlBackgroundColor).ignoresSafeArea())
+        .onAppear(perform: syncEventDetailsToState)
+        .onChange(of: selectedEvent) { _, _ in syncEventDetailsToState() }
+        // --- Toolbar for Save Event button REMOVED ---
+        .alert("Delete Event", isPresented: $showingDeleteConfirmation, presenting: selectedEvent) { eventToDelete in
+            Button("Delete", role: .destructive) {
+                deleteEvent(event: eventToDelete)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { eventToDelete in
+            Text("Are you sure you want to delete the event '\(eventToDelete.title ?? "this event")'? This action cannot be undone.")
+        }
+    }
 
-            if let event = selectedEvent {
+    private var viewHeader: some View {
+        HStack {
+            Text(selectedEvent != nil ? "Event Details" : (selectedArc != nil ? "Arc Details" : "Details"))
+                .font(.title2).fontWeight(.bold)
+            Spacer()
+            Button {
+                selectedEvent = nil
+                selectedArc = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.gray)
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .padding(.bottom, 5)
+    }
+
+    @ViewBuilder
+    private var eventDetailContent: some View {
+        if let event = selectedEvent {
+            VStack(alignment: .leading, spacing: 12) {
+                // Core Info Fields
                 Group {
-                    Text(event.title ?? "Untitled Event")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    Divider()
-                    
-                    // Use provisional date if available, otherwise the event's actual date
-                    Text("Date: \(provisionalEventDateOverride ?? event.eventDate ?? Date(), formatter: itemFormatter)")
-                    Text("Duration: \(event.durationDays) day(s)")
-                    
-                    if let desc = event.eventDescription, !desc.isEmpty {
-                        Text("Description:")
-                            .fontWeight(.semibold)
-                        ScrollView { Text(desc) }
-                            .frame(maxHeight: 100)
-                            .padding(.bottom, 5)
+                    fieldLabel("Event Title")
+                    TextField("", text: Binding(get: { event.title ?? "" }, set: { event.title = $0 }), prompt: Text("Enter event title"))
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    fieldLabel("Type")
+                    TextField("", text: Binding(get: { event.type ?? "" }, set: { event.type = $0 }), prompt: Text("e.g., Interview"))
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !(event.type?.isEmpty ?? true) {
+                         Text(event.type ?? "").font(.caption2).foregroundColor(.gray).padding(.leading, 1)
                     }
 
-                    if let participants = event.participatingCharacters as? Set<CharacterItem>, !participants.isEmpty {
-                        Text("Participants:")
-                            .fontWeight(.semibold)
-                        ForEach(participants.sorted(by: { $0.name ?? "" < $1.name ?? "" }), id: \.self) { char in
-                            HStack {
-                                if let hex = char.colorHex, let color = Color(hex: hex) {
-                                    Circle().fill(color).frame(width: 10, height: 10)
-                                }
-                                Text(char.name ?? "Unknown Character")
-                            }
+                    fieldLabel("Color")
+                    HStack {
+                        ColorPicker("", selection: $eventUIColor, supportsOpacity: false)
+                            .labelsHidden()
+                            .onChange(of: eventUIColor) { _, newColor in updateEventColorFromPicker(newColor) }
+
+                        TextField("", text: $eventColorHexInput, prompt: Text("#RRGGBB"))
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onChange(of: eventColorHexInput) { _, newHex in updateEventColorFromHexInput(newHex) }
+                    }
+
+                    fieldLabel("Start Date")
+                    DatePicker("", selection: Binding(
+                        get: { provisionalEventDateOverride ?? event.eventDate ?? Date() },
+                        set: { event.eventDate = $0 }
+                    ), displayedComponents: .date)
+                    .labelsHidden()
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        fieldLabel("Duration")
+                        HStack {
+                            Text("\(editableDurationDays) day(s)")
+                            Spacer()
+                            Stepper("", value: $editableDurationDays, in: 0...365, step: 1)
+                                .labelsHidden()
                         }
-                    } else {
-                        Text("No participants assigned.").foregroundColor(.secondary)
                     }
-                }
-                .padding(.bottom, 5)
+                    .onChange(of: editableDurationDays) { _, newValue in
+                        event.durationDays = Int16(newValue)
+                    }
 
-                Spacer()
-
-                Button("Edit Event") {
-                    showingEditEventSheet = true
+                    fieldLabel("Location")
+                    TextField("", text: Binding(get: { event.locationName ?? "" }, set: { event.locationName = $0 }), prompt: Text("Location name"))
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
-                .sheet(isPresented: $showingEditEventSheet) {
-                    EditEventView(event: event)
-                        .environment(\.managedObjectContext, self.viewContext)
-                }
+                Divider().padding(.vertical, 5)
 
-            } else if let arc = selectedArc {
                 Group {
-                    Text(arc.name ?? "Untitled Arc")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    Divider()
-
-                    if let charName = arc.character?.name {
-                        Text("Character: \(charName)")
-                    }
-                    
-                    if let desc = arc.arcDescription, !desc.isEmpty {
-                        Text("Description:").fontWeight(.semibold)
-                        ScrollView { Text(desc) }
-                            .frame(maxHeight: 100)
-                            .padding(.bottom, 5)
-                    }
-
-                    if let startEvent = arc.startEvent {
-                        Text("Starts at: \(startEvent.title ?? "N/A") (\(startEvent.eventDate ?? Date(), formatter: itemFormatter))")
-                    }
-                    if let peakEvent = arc.peakEvent {
-                        Text("Peaks at: \(peakEvent.title ?? "N/A") (\(peakEvent.eventDate ?? Date(), formatter: itemFormatter))")
-                    }
-                    if let endEvent = arc.endEvent {
-                        Text("Ends at: \(endEvent.title ?? "N/A") (\(endEvent.eventDate ?? Date(), formatter: itemFormatter))")
-                    }
+                    fieldLabel("Description")
+                    TextEditor(text: Binding(
+                        get: { event.eventDescription ?? "" },
+                        set: { event.eventDescription = $0 }
+                    ))
+                    .frame(minHeight: 60, idealHeight: 100, maxHeight: 150)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.gray.opacity(0.2)))
+                    .font(.system(.body))
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.bottom, 5)
-
-                Spacer()
-
-                Button("Edit Arc") {
-                    showingEditArcSheet = true
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
-                .sheet(isPresented: $showingEditArcSheet) {
-                    if let arcProject = arc.project {
-                        EditCharacterArcView(arc: arc, project: arcProject)
-                            .environment(\.managedObjectContext, self.viewContext)
-                    } else {
-                        Text("Error: Arc is not associated with a project.")
-                    }
-                }
+                Divider().padding(.vertical, 5)
                 
+                eventParticipantsSection(event: event)
+                                
+                Divider().padding(.vertical, 10)
+
+                // --- ACTION BUTTONS MOVED AND GROUPED HERE ---
+                HStack {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Label("Delete Event", systemImage: "trash")
+                    }
+                    // .buttonStyle(.bordered) // Use a less prominent style for delete if preferred
+                    
+                    Spacer() // Puts space between delete and save
+
+                    Button("Save Event") {
+                        saveEventChanges()
+                    }
+                    .buttonStyle(.borderedProminent) // Make Save more prominent
+                    .disabled(selectedEvent == nil || !viewContext.hasChanges)
+                    .keyboardShortcut("s", modifiers: .command)
+                }
+                .padding(.top, 10)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    
+    @ViewBuilder
+    private func eventParticipantsSection(event: EventItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            fieldLabel("Participants (\(participatingCharacterIDs.count))")
+            if projectCharacters.isEmpty {
+                Text("No characters in this project to add.").foregroundColor(.secondary)
             } else {
-                Text("Select an item on the timeline to see its details.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                VStack(alignment: .leading) {
+                    ForEach(projectCharacters) { character in
+                        participantRow(for: character, event: event)
+                    }
+                }
+                // Consider .frame(maxHeight: 150) and wrapping in ScrollView if list can be very long
             }
         }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
+    }
+    
+    @ViewBuilder
+    private func participantRow(for character: CharacterItem, event: EventItem) -> some View {
+        Button(action: {
+            toggleCharacterParticipation(character, for: event)
+        }) {
+            HStack {
+                Image(systemName: participatingCharacterIDs.contains(character.id!) ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(participatingCharacterIDs.contains(character.id!) ? .accentColor : .gray)
+                Text(character.name ?? "Unnamed Character")
+                Spacer()
+                if let hex = character.colorHex, let color = Color(hex: hex) {
+                    Circle().fill(color).frame(width: 10, height: 10)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func toggleCharacterParticipation(_ character: CharacterItem, for event: EventItem) {
+        guard let charId = character.id else { return }
+        let mutableParticipants = event.mutableSetValue(forKey: "participatingCharacters")
+        if participatingCharacterIDs.contains(charId) {
+            if mutableParticipants.contains(character) { mutableParticipants.remove(character) }
+            participatingCharacterIDs.remove(charId)
+        } else {
+            if !mutableParticipants.contains(character) { mutableParticipants.add(character) }
+            participatingCharacterIDs.insert(charId)
+        }
+    }
+    
+    @ViewBuilder
+    private func arcDetailContent(arc: CharacterArcItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(arc.name ?? "Untitled Arc").font(.title3).fontWeight(.bold)
+            Divider()
+            if let charName = arc.character?.name { Text("Character: \(charName)") }
+            if let desc = arc.arcDescription, !desc.isEmpty {
+                 Text("Description:").fontWeight(.semibold)
+                 ScrollView { Text(desc) }.frame(maxHeight: 100)
+            }
+            if let startEvent = arc.startEvent { Text("Starts at: \(startEvent.title ?? "N/A") (\(startEvent.eventDate ?? Date(), formatter: itemFormatter))") }
+            if let peakEvent = arc.peakEvent { Text("Peaks at: \(peakEvent.title ?? "N/A") (\(peakEvent.eventDate ?? Date(), formatter: itemFormatter))") }
+            if let endEvent = arc.endEvent { Text("Ends at: \(endEvent.title ?? "N/A") (\(endEvent.eventDate ?? Date(), formatter: itemFormatter))") }
+            Spacer()
+        }
+    }
+
+    private var placeholderContent: some View {
+        Text("Select an item on the timeline to see its details, or click '+' in the header to create a new event.")
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding()
+    }
+    
+    private func saveEventChanges() {
+        guard let event = selectedEvent else { return }
+        updateEventColorFromHexInput(eventColorHexInput)
+        
+        if viewContext.hasChanges {
+            do {
+                try viewContext.save()
+            } catch {
+                let nsError = error as NSError
+                print("Error saving event changes: \(nsError), \(nsError.userInfo)")
+            }
+        }
+    }
+
+    private func deleteEvent(event: EventItem) {
+        viewContext.delete(event)
+        do {
+            try viewContext.save()
+            self.selectedEvent = nil
+        } catch {
+            let nsError = error as NSError
+            print("Error deleting event: \(nsError), \(nsError.userInfo)")
+        }
     }
 }
 
@@ -145,41 +328,25 @@ struct TimelineItemDetailView_Previews: PreviewProvider {
         let context = PersistenceController.preview.container.viewContext
         let sampleProject = ProjectItem(context: context)
         sampleProject.title = "Preview Project Details"
-        sampleProject.id = UUID()
+
+        let charForEvent1 = CharacterItem(context: context); charForEvent1.id = UUID(); charForEvent1.name = "Alice"; charForEvent1.project = sampleProject
+        let charForEvent2 = CharacterItem(context: context); charForEvent2.id = UUID(); charForEvent2.name = "Bob"; charForEvent2.project = sampleProject
 
         let sampleEvent = EventItem(context: context)
-        sampleEvent.title = "Sample Event for Detail"; sampleEvent.eventDate = Date(); sampleEvent.durationDays = 2
-        sampleEvent.eventDescription = "This is a detailed description of the sample event that can be quite long and should wrap and scroll nicely within the allocated space for it."; sampleEvent.project = sampleProject; sampleEvent.id = UUID()
+        sampleEvent.title = "Preview Event"; sampleEvent.eventDate = Date(); sampleEvent.durationDays = 0
+        sampleEvent.eventDescription = "A detailed description."; sampleEvent.project = sampleProject
+        sampleEvent.eventColorHex = "#8E44AD"; sampleEvent.locationName = "Hotel Cosmopolitan"
+        sampleEvent.type = "Key Clue Discovery"
         
-        let sampleCharacter = CharacterItem(context: context)
-        sampleCharacter.name = "Detail Character"; sampleCharacter.project = sampleProject; sampleCharacter.id = UUID(); sampleCharacter.colorHex = "#007AFF"
-        sampleEvent.addToParticipatingCharacters(sampleCharacter)
-
-        let sampleArc = CharacterArcItem(context: context)
-        sampleArc.name = "Sample Arc for Detail"; sampleArc.project = sampleProject; sampleArc.character = sampleCharacter; sampleArc.id = UUID(); sampleArc.startEvent = sampleEvent
-
-        return Group {
-            TimelineItemDetailView(
+        sampleEvent.addToParticipatingCharacters(charForEvent1)
+        
+        return TimelineItemDetailView(
                 project: sampleProject,
                 selectedEvent: .constant(sampleEvent),
                 selectedArc: .constant(nil),
-                provisionalEventDateOverride: Calendar.current.date(byAdding: .day, value: 1, to: sampleEvent.eventDate!) // Example override
-            )
-            .environment(\.managedObjectContext, context)
-            .frame(width: 280, height: 400)
-            .previewLayout(.sizeThatFits)
-            .previewDisplayName("Event Detail (Dragged)")
-
-            TimelineItemDetailView(
-                project: sampleProject,
-                selectedEvent: .constant(nil),
-                selectedArc: .constant(sampleArc),
                 provisionalEventDateOverride: nil
             )
             .environment(\.managedObjectContext, context)
-            .frame(width: 280, height: 400)
-            .previewLayout(.sizeThatFits)
-            .previewDisplayName("Arc Detail")
-        }
+            .frame(width: 280, height: 800)
     }
 }

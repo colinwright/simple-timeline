@@ -2,28 +2,21 @@ import SwiftUI
 import CoreData
 
 struct CharacterListView: View {
-    // The project this view is for
     @ObservedObject var project: ProjectItem
-
-    // Core Data context
     @Environment(\.managedObjectContext) private var viewContext
+    @Binding var selection: MainViewSelection // For main breadcrumb navigation
 
-    // FetchRequest for characters of the current project
     @FetchRequest private var characters: FetchedResults<CharacterItem>
 
-    // State for presenting AddCharacterView sheet
+    @State private var selectedCharacter: CharacterItem?
     @State private var showingAddCharacterView = false
-    // State for presenting EditCharacterView sheet
-    @State private var characterToEdit: CharacterItem?
-    
-    // State to track expanded character descriptions by their ID
-    @State private var expandedCharacterIDs: Set<UUID> = []
+    @State private var isCharacterListVisible: Bool = true
 
-    // Initializer to set up the FetchRequest with a predicate for the specific project
-    init(project: ProjectItem) {
-        _project = ObservedObject(initialValue: project) // Initialize @ObservedObject
-        
-        // Initialize the FetchRequest to filter characters by the current project
+    private let listHeaderHeight: CGFloat = 30 + (2 * 4) // Consistent with WikiView
+
+    init(project: ProjectItem, selection: Binding<MainViewSelection>) {
+        _project = ObservedObject(initialValue: project)
+        _selection = selection
         _characters = FetchRequest<CharacterItem>(
             sortDescriptors: [NSSortDescriptor(keyPath: \CharacterItem.name, ascending: true)],
             predicate: NSPredicate(format: "project == %@", project),
@@ -31,141 +24,142 @@ struct CharacterListView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading) {
-            HStack {
-                Text("Characters in: \(project.title ?? "Untitled Project")")
-                    .font(.headline)
-                Spacer()
+        VStack(alignment: .leading, spacing: 8) { // Root VStack
+            DetailViewHeader {
+                BreadcrumbView(
+                    projectTitle: project.title ?? "Untitled Project",
+                    currentViewName: "Characters",
+                    isProjectTitleClickable: true,
+                    projectHomeAction: { selection = .projectHome }
+                )
+            } trailing: {
                 Button {
                     showingAddCharacterView = true
                 } label: {
-                    Label("Add Character", systemImage: "person.crop.circle.fill.badge.plus")
+                    Label("Add Character", systemImage: "person.fill.badge.plus")
                 }
             }
-            .padding(.bottom)
 
-            if characters.isEmpty {
-                Text("No characters yet. Click the '+' button to add one.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            } else {
-                List {
-                    ForEach(characters) { character in
-                        HStack(alignment: .top) { // Align items to the top for consistent button placement
-                            VStack(alignment: .leading) {
-                                HStack { // HStack for name and color indicator
-                                    Text(character.name ?? "Unnamed Character")
-                                        .font(.body)
-                                    if let hex = character.colorHex, let color = Color(hex: hex) {
-                                        Circle()
-                                            .fill(color)
-                                            .frame(width: 10, height: 10)
-                                    }
+            HStack(spacing: 0) { // Master-Detail
+                // Master Pane: Character List (Collapsible)
+                if isCharacterListVisible {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text("Characters")
+                                .font(.title3)
+                                .padding(.leading)
+                            Spacer()
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isCharacterListVisible.toggle()
                                 }
-                                if let desc = character.characterDescription, !desc.isEmpty {
-                                    Text(desc)
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                        .lineLimit(expandedCharacterIDs.contains(character.id!) ? nil : 1) // Expandable
-                                }
+                            } label: {
+                                Image(systemName: "chevron.left.square.fill")
                             }
-                            Spacer() // Pushes action buttons to the right
-
-                            // Group expander and actions menu in their own HStack
-                            HStack(spacing: 8) {
-                                // Expander Button for description
-                                if let desc = character.characterDescription, !desc.isEmpty {
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            toggleExpansion(for: character)
-                                        }
-                                    } label: {
-                                        Image(systemName: expandedCharacterIDs.contains(character.id!) ? "chevron.up" : "chevron.down")
-                                            .imageScale(.small)
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                }
-
-                                // Action menu (Edit/Delete)
-                                Menu {
-                                    Button {
-                                        characterToEdit = character // Set the character to edit
-                                    } label: {
-                                        Label("Edit Character", systemImage: "pencil")
-                                    }
-                                    Button(role: .destructive) {
-                                        deleteCharacter(character)
-                                    } label: {
-                                        Label("Delete Character", systemImage: "trash")
-                                    }
-                                } label: {
-                                    Image(systemName: "ellipsis")
-                                         .imageScale(.medium)
-                                         .foregroundColor(.primary)
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                                .frame(width: 28, height: 28, alignment: .center)
-                            }
+                            .buttonStyle(.borderless)
+                            .padding(.trailing)
                         }
-                        .contentShape(Rectangle())
-                        .contextMenu {
-                             Button {
-                                characterToEdit = character // Set the character to edit
-                            } label: {
-                                Label("Edit Character", systemImage: "pencil")
+                        .frame(height: 30)
+                        .padding(.vertical, 4)
+                        
+                        Divider()
+                        
+                        List { // Removed selection binding for manual tap
+                            ForEach(characters) { character in
+                                HStack {
+                                    if let hex = character.colorHex, let color = Color(hex: hex) {
+                                        Circle().fill(color).frame(width: 10, height: 10)
+                                    }
+                                    Text(character.name ?? "Unnamed Character")
+                                    Spacer()
+                                }
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(selectedCharacter == character ? Color.accentColor.opacity(0.2) : Color.clear)
+                                .cornerRadius(4)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedCharacter = character
+                                }
                             }
-                            Button(role: .destructive) {
-                                deleteCharacter(character)
+                            .onDelete(perform: deleteCharacters)
+                        }
+                        .listStyle(.sidebar)
+                    }
+                    .frame(width: 240)
+                    .transition(.move(edge: .leading))
+                    Divider()
+                }
+
+                // Detail Pane
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        if !isCharacterListVisible {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isCharacterListVisible.toggle()
+                                }
                             } label: {
-                                Label("Delete Character", systemImage: "trash")
+                                Image(systemName: "chevron.right.square.fill")
                             }
+                            .buttonStyle(.borderless)
+                            .padding(.leading)
+                        }
+                        Spacer()
+                    }
+                    .frame(height: listHeaderHeight)
+                    .opacity(!isCharacterListVisible ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.2), value: isCharacterListVisible)
+
+                    Group {
+                        if let char = selectedCharacter {
+                            EditCharacterView(character: char) // Use the refactored EditCharacterView
+                                .id(char.id)
+                        } else {
+                            VStack {
+                                Spacer()
+                                Text(characters.isEmpty ? "No characters yet." : "Select a character to view details.")
+                                    .font(.title2)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                if characters.isEmpty {
+                                    Text("Click 'Add Character' in the header to start.")
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
-                    .onDelete(perform: deleteCharactersFromOffsets)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Spacer()
         }
-        .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(isPresented: $showingAddCharacterView) {
             AddCharacterView(project: project)
         }
-        .sheet(item: $characterToEdit) { characterToEdit in
-            // Present the EditCharacterView
-            EditCharacterView(character: characterToEdit)
+        .onChange(of: selectedCharacter) { oldValue, newValue in
+            // print("Selected character changed to: \(newValue?.name ?? "None")")
         }
     }
-
-    private func toggleExpansion(for character: CharacterItem) {
-        guard let characterID = character.id else { return }
-        if expandedCharacterIDs.contains(characterID) {
-            expandedCharacterIDs.remove(characterID)
-        } else {
-            expandedCharacterIDs.insert(characterID)
-        }
-    }
-
-    private func deleteCharactersFromOffsets(offsets: IndexSet) {
+    
+    private func deleteCharacters(offsets: IndexSet) {
         withAnimation {
-            offsets.map { characters[$0] }.forEach(viewContext.delete)
-            saveContext()
-        }
-    }
-
-    private func deleteCharacter(_ character: CharacterItem) {
-        withAnimation {
-            viewContext.delete(character)
-            saveContext()
-        }
-    }
-
-    private func saveContext() {
-        do {
-            try viewContext.save()
-        } catch {
-            let nsError = error as NSError
-            print("Unresolved error saving context for characters: \(nsError), \(nsError.userInfo)")
+            offsets.map { characters[$0] }.forEach { characterToDelete in
+                if selectedCharacter == characterToDelete {
+                    selectedCharacter = nil
+                }
+                viewContext.delete(characterToDelete)
+            }
+            do {
+                try viewContext.save()
+            } catch {
+                let nsError = error as NSError
+                print("Unresolved error deleting characters: \(nsError), \(nsError.userInfo)")
+            }
         }
     }
 }
@@ -174,20 +168,13 @@ struct CharacterListView_Previews: PreviewProvider {
     static var previews: some View {
         let context = PersistenceController.preview.container.viewContext
         let sampleProject = ProjectItem(context: context)
-        sampleProject.title = "Sample Project for Characters"
-        sampleProject.creationDate = Date()
-        sampleProject.id = UUID()
+        sampleProject.title = "Sample Project"
         
-        let sampleCharacter = CharacterItem(context: context)
-        sampleCharacter.name = "Hero Character"
-        sampleCharacter.characterDescription = "The main protagonist with a description long enough to test the expander functionality and see if it wraps correctly."
-        sampleCharacter.creationDate = Date()
-        sampleCharacter.id = UUID()
-        sampleCharacter.colorHex = "#FF0000" // Red for preview
-        sampleCharacter.project = sampleProject // Associate with the project
+        let char1 = CharacterItem(context: context); char1.name = "Alice"; char1.colorHex = "#FF0000"; char1.project = sampleProject
+        let char2 = CharacterItem(context: context); char2.name = "Bob"; char2.colorHex = "#00FF00"; char2.project = sampleProject
 
-        return CharacterListView(project: sampleProject)
+        return CharacterListView(project: sampleProject, selection: .constant(.characters))
             .environment(\.managedObjectContext, context)
-            .frame(width: 400, height: 500)
+            .frame(width: 900, height: 700)
     }
 }

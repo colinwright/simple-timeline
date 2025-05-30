@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" userDefinedModelVersionIdentifier="">
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788.4" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" userDefinedModelVersionIdentifier="">
     <entity name="CharacterArcItem" representedClassName="CharacterArcItem" syncable="YES" codeGenerationType="class">
         <attribute name="arcDescription" optional="YES" attributeType="String"/>
         <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
@@ -21,12 +21,23 @@
         <relationship name="events" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="EventItem" inverseName="participatingCharacters" inverseEntity="EventItem"/>
         <relationship name="project" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="characters" inverseEntity="ProjectItem"/>
     </entity>
+    <entity name="CustomFieldDefinitionItem" representedClassName="CustomFieldDefinitionItem" syncable="YES" codeGenerationType="class">
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="fieldType" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="value" optional="YES" attributeType="String"/>
+        <relationship name="project" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="customFieldDefinitions" inverseEntity="ProjectItem"/>
+    </entity>
     <entity name="EventItem" representedClassName="EventItem" syncable="YES" codeGenerationType="class">
         <attribute name="durationDays" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="eventColorHex" optional="YES" attributeType="String"/>
         <attribute name="eventDate" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="eventDescription" optional="YES" attributeType="String"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="locationName" optional="YES" attributeType="String"/>
         <attribute name="title" optional="YES" attributeType="String"/>
+        <attribute name="type" optional="YES" attributeType="String"/>
         <relationship name="arcsEnded" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="CharacterArcItem" inverseName="endEvent" inverseEntity="CharacterArcItem"/>
         <relationship name="arcsPeaked" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="CharacterArcItem" inverseName="peakEvent" inverseEntity="CharacterArcItem"/>
         <relationship name="arcsStarted" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="CharacterArcItem" inverseName="startEvent" inverseEntity="CharacterArcItem"/>
@@ -42,6 +53,16 @@
         <attribute name="title" optional="YES" attributeType="String"/>
         <relationship name="characterArcs" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CharacterArcItem" inverseName="project" inverseEntity="CharacterArcItem"/>
         <relationship name="characters" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CharacterItem" inverseName="project" inverseEntity="CharacterItem"/>
+        <relationship name="customFieldDefinitions" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="CustomFieldDefinitionItem" inverseName="project" inverseEntity="CustomFieldDefinitionItem"/>
         <relationship name="events" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="EventItem" inverseName="project" inverseEntity="EventItem"/>
+        <relationship name="wikiPages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="WikiPageItem" inverseName="project" inverseEntity="WikiPageItem"/>
+    </entity>
+    <entity name="WikiPageItem" representedClassName="WikiPageItem" syncable="YES" codeGenerationType="class">
+        <attribute name="content" optional="YES" attributeType="String"/>
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="lastModifiedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="title" attributeType="String"/>
+        <relationship name="project" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="wikiPages" inverseEntity="ProjectItem"/>
     </entity>
 </model>

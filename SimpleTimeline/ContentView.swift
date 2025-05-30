@@ -1,77 +1,117 @@
 import SwiftUI
 import CoreData
 
-// Enum to manage which main view is selected
+// The MainViewSelection enum now includes a state for the project's home page.
 enum MainViewSelection {
-    case characters, wiki, timeline // Changed from .bible to .wiki
+    case projectHome, characters, wiki, timeline
 }
 
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var viewContext
 
-    // Fetch all projects. We'll use the first one for now.
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \ProjectItem.creationDate, ascending: true)],
         animation: .default)
     private var projects: FetchedResults<ProjectItem>
     
-    // State to track the main view selection
-    @State private var selection: MainViewSelection = .timeline // Default selection
+    @State private var activeProject: ProjectItem?
     
-    // State for the settings sheet
+    // Default selection is now the project's home page.
+    @State private var selection: MainViewSelection = .projectHome
+    
     @State private var showingSettings = false
 
     var body: some View {
         NavigationSplitView {
-            // Sidebar with navigation icons
-            VStack {
-                Button(action: { selection = .characters }) {
-                    Label("Characters", systemImage: "person.3")
-                }
-                .buttonStyle(SidebarButtonStyle(isSelected: selection == .characters))
+            VStack(spacing: 16) {
+                // This group contains the main project-specific navigation buttons.
+                Group {
+                    // New "Project" button to go to the project's landing page
+                    Button(action: { selection = .projectHome }) {
+                        sidebarButtonContent(
+                            title: "Project",
+                            systemImage: "doc.text.image",
+                            isSelected: selection == .projectHome
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button(action: { selection = .wiki }) { // Changed to .wiki
-                    Label("Wiki", systemImage: "book.closed") // Changed label text
-                }
-                .buttonStyle(SidebarButtonStyle(isSelected: selection == .wiki))
+                    Button(action: { selection = .characters }) {
+                        sidebarButtonContent(
+                            title: "Characters",
+                            systemImage: "person.3",
+                            isSelected: selection == .characters
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Button(action: { selection = .timeline }) {
-                    Label("Timeline", systemImage: "chart.bar.xaxis")
+                    Button(action: { selection = .wiki }) {
+                        sidebarButtonContent(
+                            title: "Wiki",
+                            systemImage: "book.closed",
+                            isSelected: selection == .wiki
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: { selection = .timeline }) {
+                        sidebarButtonContent(
+                            title: "Timeline",
+                            systemImage: "chart.bar.xaxis",
+                            isSelected: selection == .timeline
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(SidebarButtonStyle(isSelected: selection == .timeline))
+                .disabled(activeProject == nil)
+                .opacity(activeProject == nil ? 0.4 : 1.0)
                 
                 Spacer()
                 
-                Button(action: { showingSettings = true }) {
-                    Label("Settings", systemImage: "gearshape")
+                // Renamed "Projects" button to "Home"
+                Button(action: { activeProject = nil }) {
+                    sidebarButtonContent(
+                        title: "Home",
+                        systemImage: "house",
+                        isSelected: activeProject == nil
+                    )
                 }
-                .buttonStyle(SidebarButtonStyle(isSelected: false))
+                .buttonStyle(.plain)
+                
+                Button(action: { showingSettings = true }) {
+                    sidebarButtonContent(
+                        title: "Settings",
+                        systemImage: "gearshape",
+                        isSelected: false
+                    )
+                }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical)
-            .frame(minWidth: 50)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
             
         } detail: {
-            if let project = projects.first {
+            if let project = activeProject {
+                // The switch now includes the new .projectHome case
                 switch selection {
+                case .projectHome:
+                    ProjectHomeView(project: project)
                 case .characters:
-                    CharacterListView(project: project)
-                case .wiki: // Changed from .bible to .wiki
-                    WikiView() // Use the new WikiView
+                    CharacterListView(project: project, selection: $selection)
+                case .wiki:
+                    WikiView(project: project, selection: $selection)
                 case .timeline:
-                    TimelineView(project: project)
+                    TimelineView(project: project, selection: $selection)
                 }
             } else {
-                VStack {
-                    Text("Welcome to Simple Timeline!")
-                        .font(.largeTitle)
-                    Text("Create a project to get started.")
-                        .foregroundColor(.secondary)
-                    Button("Create New Project", action: addProject)
-                        .padding(.top)
-                }
+                ProjectSelectionView(
+                    projects: projects,
+                    activeProject: $activeProject,
+                    addProjectAction: addProject
+                )
             }
         }
+        .navigationSplitViewColumnWidth(80)
         .sheet(isPresented: $showingSettings) {
             VStack {
                 Text("Settings").font(.largeTitle).padding()
@@ -84,20 +124,24 @@ struct ContentView: View {
         }
     }
     
-    struct SidebarButtonStyle: ButtonStyle {
-        let isSelected: Bool
-        
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .labelStyle(.iconOnly)
+    @ViewBuilder
+    private func sidebarButtonContent(title: String, systemImage: String, isSelected: Bool) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: systemImage)
                 .font(.title2)
-                .padding(8)
-                .frame(maxWidth: .infinity)
-                .background(isSelected ? Color.accentColor.opacity(0.3) : Color.clear)
-                .foregroundColor(isSelected ? .accentColor : .secondary)
-                .cornerRadius(6)
-                .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+                .symbolVariant(isSelected ? .fill : .none)
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle()
+                        .fill(isSelected ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.1))
+                )
+
+            Text(title)
+                .font(.caption)
         }
+        .foregroundColor(isSelected ? .accentColor : .primary.opacity(0.7))
+        .frame(width: 70, height: 70)
+        .contentShape(Rectangle())
     }
 
     private func addProject() {
@@ -105,7 +149,11 @@ struct ContentView: View {
             let newProject = ProjectItem(context: viewContext)
             newProject.id = UUID()
             newProject.creationDate = Date()
-            newProject.title = "New Project \(projects.count + 1)" // Ensure unique default names
+            newProject.title = "New Project \(projects.count + 1)"
+            
+            activeProject = newProject
+            // When a new project is created, go directly to its home/edit page.
+            selection = .projectHome
             
             do {
                 try viewContext.save()
