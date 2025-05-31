@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import Combine // Required for .onReceive
 
 struct TimelineView: View {
     @ObservedObject var project: ProjectItem
@@ -11,13 +12,18 @@ struct TimelineView: View {
     @FetchRequest private var characters: FetchedResults<CharacterItem>
     @FetchRequest private var characterArcs: FetchedResults<CharacterArcItem>
 
+    // For Event Type Lanes
+    @State private var eventTypesForLanes: [String] = []
+    @State private var eventTypeIndices: [String: Int] = [:]
+    private let unclassifiedEventsLaneName = "Uncategorized"
+    private let eventTypeLaneHeaderWidth: CGFloat = 150
+
     // Timeline drawing constants
-    private let eventBlockBaseHeight: CGFloat = 50
-    private let arcHeight: CGFloat = 10
-    private let peakIndicatorHeight: CGFloat = 14
+    private let eventBlockBaseHeight: CGFloat = 75
+    private let arcHeight: CGFloat = 8
+    private let peakIndicatorHeight: CGFloat = 12
     private let horizontalPadding: CGFloat = 20
-    private let characterLaneHeaderWidth: CGFloat = 150
-    private let laneHeight: CGFloat = 40
+    private let laneHeight: CGFloat = 85
     private let instantaneousEventWidth: CGFloat = 10
     private let topOffsetForTimeAxis: CGFloat = 50
     private let detailPanelWidth: CGFloat = 280
@@ -31,32 +37,30 @@ struct TimelineView: View {
     // For Magnification Gesture
     @GestureState private var magnifyBy: CGFloat = 1.0
 
-    // State for selected items to show in the detail panel
+    // State for selected items
     @State private var selectedEventForDetail: EventItem?
     @State private var selectedArcForDetail: CharacterArcItem?
-    
     @State private var activelyDraggingEventID: UUID?
-    @State private var originalDateForDraggedEvent: Date?
 
     init(project: ProjectItem, selection: Binding<MainViewSelection>) {
-        _project = ObservedObject(initialValue: project)
-        _selection = selection
-        
+        self.project = project
+        self._selection = selection
+
         let projectPredicate = NSPredicate(format: "project == %@", project)
         
-        _events = FetchRequest<EventItem>(
+        self._events = FetchRequest<EventItem>(
             sortDescriptors: [NSSortDescriptor(keyPath: \EventItem.eventDate, ascending: true)],
             predicate: projectPredicate,
             animation: .default
         )
         
-        _characters = FetchRequest<CharacterItem>(
+        self._characters = FetchRequest<CharacterItem>(
             sortDescriptors: [NSSortDescriptor(keyPath: \CharacterItem.name, ascending: true)],
             predicate: projectPredicate,
             animation: .default
         )
         
-        _characterArcs = FetchRequest<CharacterArcItem>(
+        self._characterArcs = FetchRequest<CharacterArcItem>(
             sortDescriptors: [NSSortDescriptor(keyPath: \CharacterArcItem.name, ascending: true)],
             predicate: projectPredicate,
             animation: .default
@@ -66,707 +70,330 @@ struct TimelineView: View {
     var body: some View {
         HStack(spacing: 0) {
             timelinePanel
-            if selectedEventForDetail != nil || selectedArcForDetail != nil {
+            if selectedEventForDetail != nil {
                 TimelineItemDetailView(
                     project: project,
                     selectedEvent: $selectedEventForDetail,
-                    selectedArc: $selectedArcForDetail,
+                    selectedArc: .constant(nil),
                     provisionalEventDateOverride: (selectedEventForDetail?.id == activelyDraggingEventID ? selectedEventForDetail?.eventDate : nil)
                 )
                 .frame(width: detailPanelWidth)
                 .layoutPriority(1)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
-                .animation(.easeInOut(duration: 0.2), value: selectedEventForDetail != nil || selectedArcForDetail != nil)
+                .animation(.easeInOut(duration: 0.2), value: selectedEventForDetail != nil || activelyDraggingEventID != nil)
+            }
+        }
+        .onAppear {
+            buildEventTypeLanesAndIndices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSManagedObjectContext.didSaveObjectsNotification, object: viewContext)) { notification in
+            var rebuildLanes = false
+            if let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject>,
+               updatedObjects.contains(where: { $0 is EventItem }) {
+                rebuildLanes = true
+            }
+            if !rebuildLanes, let insertedObjects = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject>,
+               insertedObjects.contains(where: { $0 is EventItem }) {
+                rebuildLanes = true
+            }
+            if !rebuildLanes, let deletedObjects = notification.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject>,
+               deletedObjects.contains(where: { $0 is EventItem }) {
+                rebuildLanes = true
+            }
+
+            if rebuildLanes {
+                buildEventTypeLanesAndIndices()
             }
         }
     }
 
     private var timelinePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DetailViewHeader {
-                BreadcrumbView(
-                    projectTitle: project.title ?? "Untitled Project",
-                    currentViewName: "Timeline",
-                    isProjectTitleClickable: true,
-                    projectHomeAction: { selection = .projectHome }
-                )
-            } trailing: {
-                // --- MODIFIED HEADER BUTTONS ---
-                HStack {
-                    Button {
-                        addNewEvent() // Action to add a new event
-                    } label: {
-                        Label("Add Event", systemImage: "plus.circle.fill")
-                            .labelStyle(.iconOnly) // Icon only
-                    }
-                    .help("Add New Event") // Tooltip
-
-                    Button {
-                        withAnimation(.easeInOut) {
-                            currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor)
-                        }
-                    } label: {
-                        Label("Zoom In", systemImage: "plus.magnifyingglass")
-                            .labelStyle(.iconOnly) // Icon only
-                    }
-                    .keyboardShortcut("+", modifiers: .command)
-                    .help("Zoom In")
-
-
-                    Button {
-                         withAnimation(.easeInOut) {
-                            currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor)
-                        }
-                    } label: {
-                        Label("Zoom Out", systemImage: "minus.magnifyingglass")
-                            .labelStyle(.iconOnly) // Icon only
-                    }
-                    .keyboardShortcut("-", modifiers: .command)
-                    .help("Zoom Out")
+        ZStack {
+            // This is the primary background tap catcher for the entire panel.
+            // It's at the bottom of the ZStack.
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // print("TimelinePanel root ZStack background tapped") // Debug
+                    deselectAllItems()
                 }
-            }
-            
-            if characters.isEmpty && events.isEmpty && characterArcs.isEmpty {
-                 Text("No data to display on the timeline. Click '+' in the header to add an event.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding()
-            } else if let currentRange = dateRange {
-                GeometryReader { geometry in
-                    timelineScrollableContent(
-                        currentRange: currentRange,
-                        geometry: geometry,
-                        charIndices: buildCharacterIndicesMap()
+
+            // All other content of the panel is in this VStack, drawn on top.
+            VStack(alignment: .leading, spacing: 8) {
+                DetailViewHeader {
+                    BreadcrumbView(
+                        projectTitle: project.title ?? "Untitled Project",
+                        currentViewName: "Timeline",
+                        isProjectTitleClickable: true,
+                        projectHomeAction: { selection = .projectHome }
                     )
+                } trailing: {
+                    HStack {
+                        Button { addNewEvent() } label: { Label("Add Event", systemImage: "plus.circle.fill").labelStyle(.iconOnly) }.help("Add New Event")
+                        Button { withAnimation(.easeInOut) { currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor) } } label: { Label("Zoom In", systemImage: "plus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("+", modifiers: .command).help("Zoom In")
+                        Button { withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor) } } label: { Label("Zoom Out", systemImage: "minus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("-", modifiers: .command).help("Zoom Out")
+                    }
                 }
-            } else {
-                 Text("Add events to see the timeline, or manage characters.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding()
+                
+                if events.isEmpty && eventTypesForLanes.isEmpty {
+                     Text("No events. Add an event to start your timeline.")
+                        .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
+                } else if let currentRange = dateRange {
+                    GeometryReader { geometry in
+                        timelineScrollableContent(currentRange: currentRange, geometry: geometry)
+                    }
+                } else {
+                     Text("Add events with dates to build the timeline.")
+                        .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
+                }
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            deselectAllItems()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // By default, this VStack should allow taps on its transparent areas
+            // to pass through to the Color.clear layer behind it.
         }
     }
     
-    // MARK: - Add New Event
-    private func addNewEvent() {
-        withAnimation {
-            // Create a new EventItem instance
-            let newEvent = EventItem(context: viewContext)
-            newEvent.id = UUID()
-            newEvent.title = "New Event" // Default title
-            
-            // Set a default date (e.g., today or middle of current timeline view)
-            if let currentTimelineRange = dateRange {
-                let calendar = Calendar.current
-                if let middleDate = calendar.date(byAdding: .day, value: (calendar.dateComponents([.day], from: currentTimelineRange.start, to: currentTimelineRange.end).day ?? 0) / 2, to: currentTimelineRange.start) {
-                    newEvent.eventDate = middleDate
-                } else {
-                    newEvent.eventDate = currentTimelineRange.start
-                }
-            } else {
-                newEvent.eventDate = Date() // Fallback to today
-            }
-            
-            newEvent.durationDays = 0 // Default duration
-            newEvent.project = self.project // Associate with the current project
-            // Initialize other optional fields as nil or with defaults if desired
-            newEvent.type = ""
-            newEvent.locationName = ""
-            newEvent.eventDescription = ""
-            newEvent.eventColorHex = nil
-
-            // Deselect any currently selected arc
-            self.selectedArcForDetail = nil
-            // Set the new event as the one to be detailed (and thus edited)
-            self.selectedEventForDetail = newEvent
+    // MARK: - Data Handling & Calculations
+    private func buildEventTypeLanesAndIndices() {
+        let typesFromEvents = Set(events.compactMap { $0.type?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty() })
+        var sortedUniqueTypes = Array(typesFromEvents).sorted()
+        let hasEventsWithNoTypeOrEmptyType = events.contains { $0.type == nil || $0.type?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true }
+        if hasEventsWithNoTypeOrEmptyType || (sortedUniqueTypes.isEmpty && !events.isEmpty) {
+            if !sortedUniqueTypes.contains(unclassifiedEventsLaneName) { sortedUniqueTypes.append(unclassifiedEventsLaneName) }
         }
+        if events.isEmpty { sortedUniqueTypes = [] }
+        self.eventTypesForLanes = sortedUniqueTypes
+        var indices: [String: Int] = [:]; self.eventTypesForLanes.enumerated().forEach { indices[$1] = $0 }; self.eventTypeIndices = indices
     }
         
-    // ... (Rest of TimelineView.swift: dateRange, buildCharacterIndicesMap, other helpers,
-    //      EventBlockView, CharacterArcView, TimeAxisView, and Previews remain the same
-    //      as the complete version from Fri, May 30 2025 11:51 AM CDT, which fixed the
-    //      EventBlockView display) ...
-    // MARK: - Computed Properties for Layout
     private var dateRange: (start: Date, end: Date)? {
-        var allDates: [Date] = []
-        let calendar = Calendar.current
-
-        for event in events {
-            if let date = event.eventDate {
-                allDates.append(date)
-                allDates.append(calendar.date(byAdding: .day, value: Int(event.durationDays), to: date) ?? date)
-            }
-        }
-        for arc in characterArcs {
+        var allDates: [Date] = []; let calendar = Calendar.current
+        events.forEach { event in if let date = event.eventDate { allDates.append(date); allDates.append(calendar.date(byAdding: .day, value: Int(event.durationDays), to: date) ?? date) } }
+        characterArcs.forEach { arc in
             if let startDate = arc.startEvent?.eventDate { allDates.append(startDate) }
             if let peakDate = arc.peakEvent?.eventDate { allDates.append(peakDate) }
-            if let endDate = arc.endEvent?.eventDate {
-                allDates.append(endDate)
-                allDates.append(calendar.date(byAdding: .day, value: Int(arc.endEvent?.durationDays ?? 0), to: endDate) ?? endDate)
-            }
+            if let endDate = arc.endEvent?.eventDate { allDates.append(endDate); allDates.append(calendar.date(byAdding: .day, value: Int(arc.endEvent?.durationDays ?? 0), to: endDate) ?? endDate) }
         }
-
-        guard !allDates.isEmpty else {
-            if !characters.isEmpty {
-                let today = Date()
-                return (calendar.date(byAdding: .day, value: -1, to: today) ?? today,
-                        calendar.date(byAdding: .day, value: 29, to: today) ?? today)
-            }
-            return nil
-        }
-
-        let minDate = allDates.min() ?? Date()
-        let maxDate = allDates.max() ?? Date()
-        
-        let paddedStartDate = calendar.date(byAdding: .day, value: -1, to: minDate) ?? minDate
-        var paddedEndDate = calendar.date(byAdding: .day, value: 1, to: maxDate) ?? maxDate
-
-        if Calendar.current.isDate(paddedEndDate, inSameDayAs: paddedStartDate) {
-             paddedEndDate = calendar.date(byAdding: .day, value: 10, to: paddedEndDate) ?? paddedEndDate
-        }
-        if paddedStartDate >= paddedEndDate {
-            paddedEndDate = calendar.date(byAdding: .day, value: 10, to: paddedStartDate) ?? paddedStartDate
-        }
-        
+        guard !allDates.isEmpty else { let today = Date(); return (calendar.date(byAdding: .day, value: -1, to: today)!, calendar.date(byAdding: .day, value: 29, to: today)!) }
+        let minDate = allDates.min()!; let maxDate = allDates.max()!
+        let paddedStartDate = calendar.date(byAdding: .day, value: -2, to: minDate)!
+        var paddedEndDate = calendar.date(byAdding: .day, value: 2, to: maxDate)!
+        if let daysBetween = calendar.dateComponents([.day], from: paddedStartDate, to: paddedEndDate).day, daysBetween < 7 { paddedEndDate = calendar.date(byAdding: .day, value: 7 - daysBetween, to: paddedEndDate)! }
+        if paddedStartDate >= paddedEndDate { paddedEndDate = calendar.date(byAdding: .day, value: 7, to: paddedStartDate)! }
         return (paddedStartDate, paddedEndDate)
     }
-    
-    private func buildCharacterIndicesMap() -> [UUID: Int] {
-        var indices: [UUID: Int] = [:]
-        for (index, character) in characters.enumerated() {
-            if let charID = character.id {
-                indices[charID] = index
-            }
-        }
-        return indices
-    }
-    
+
     private func calculateTotalTimelineContentWidth(for range: (start: Date, end: Date), pixelsPerDayToUse: CGFloat) -> CGFloat {
-        let durationInDays = Calendar.current.dateComponents([.day], from: range.start, to: range.end).day ?? 1
-        return CGFloat(max(durationInDays, 1)) * pixelsPerDayToUse
+        CGFloat(max(1, Calendar.current.dateComponents([.day], from: range.start, to: range.end).day ?? 1)) * pixelsPerDayToUse
     }
-    
+
+    private func xPosition(for date: Date, timelineStartDate: Date, currentPixelsPerDay: CGFloat) -> CGFloat {
+        eventTypeLaneHeaderWidth + CGFloat(Calendar.current.dateComponents([.day], from: timelineStartDate, to: date).day ?? 0) * currentPixelsPerDay + horizontalPadding
+    }
+
+    private func findYPositionForEvent(eventType: String, eventHeight: CGFloat) -> CGFloat {
+        let laneIndex = eventTypeIndices[eventType] ?? eventTypesForLanes.firstIndex(of: unclassifiedEventsLaneName) ?? (eventTypesForLanes.indices.last ?? 0)
+        let laneTopY = topOffsetForTimeAxis + (CGFloat(laneIndex) * laneHeight)
+        return laneTopY + (laneHeight / 2)
+    }
+
+    private func calculateTotalHeight() -> CGFloat {
+        let numberOfVisualLanes = max(1, eventTypesForLanes.count)
+        let totalLanesHeight = CGFloat(numberOfVisualLanes) * laneHeight
+        return totalLanesHeight + topOffsetForTimeAxis + 50
+    }
+
+    // MARK: - UI Actions
+    private func addNewEvent() {
+        withAnimation {
+            let newEvent = EventItem(context: viewContext); newEvent.id = UUID(); newEvent.title = "New Event"
+            if let currentTimelineRange = dateRange { let calendar = Calendar.current
+                newEvent.eventDate = calendar.date(byAdding: .day, value: (calendar.dateComponents([.day], from: currentTimelineRange.start, to: currentTimelineRange.end).day ?? 0) / 2, to: currentTimelineRange.start) ?? Date()
+            } else { newEvent.eventDate = Date() }
+            newEvent.durationDays = 0; newEvent.project = self.project; newEvent.summaryLine = nil; newEvent.type = nil
+            self.selectedArcForDetail = nil; self.selectedEventForDetail = newEvent; buildEventTypeLanesAndIndices()
+        }
+    }
     private func deselectAllItems() {
-        if selectedEventForDetail != nil || selectedArcForDetail != nil || activelyDraggingEventID != nil {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                self.selectedEventForDetail = nil
-                self.selectedArcForDetail = nil
-                self.activelyDraggingEventID = nil
-                self.originalDateForDraggedEvent = nil
-            }
+        if selectedEventForDetail != nil || activelyDraggingEventID != nil {
+            withAnimation(.easeInOut(duration: 0.1)) { self.selectedEventForDetail = nil; self.activelyDraggingEventID = nil }
         }
     }
-    
-    private func handleEventDragStateChange(event: EventItem, isDragging: Bool, originalDragStartDate: Date?, newProvisionalDate: Date?) {
-        if isDragging {
-            self.activelyDraggingEventID = event.id
-            if self.originalDateForDraggedEvent == nil {
-                self.originalDateForDraggedEvent = originalDragStartDate
-            }
-            if self.selectedEventForDetail?.id == event.id {
-                self.selectedEventForDetail = event
-            }
-        } else {
-            self.activelyDraggingEventID = nil
-            self.originalDateForDraggedEvent = nil
-            if self.selectedEventForDetail?.id == event.id {
-                 self.selectedEventForDetail = event
-            }
-        }
+    private func handleEventDragStateChange(event: EventItem, isDragging: Bool, originalDragStartDate: Date?, currentProvisionalOrFinalDate: Date?) {
+        if isDragging { self.activelyDraggingEventID = event.id; if self.selectedEventForDetail?.id != event.id { self.selectedArcForDetail = nil; self.selectedEventForDetail = event }
+        } else { self.activelyDraggingEventID = nil; if let currentlySelected = self.selectedEventForDetail, currentlySelected.id == event.id { let refreshedEvent = event; self.selectedEventForDetail = nil; DispatchQueue.main.async { self.selectedEventForDetail = refreshedEvent } } }
     }
-    // MARK: - Scrollable Content and Layers
+
+    // MARK: - Scrollable Content & Layers
     @ViewBuilder
-    private func timelineScrollableContent(
-        currentRange: (start: Date, end: Date),
-        geometry: GeometryProxy,
-        charIndices: [UUID: Int]
-    ) -> some View {
-        let availableWidthForContent = geometry.size.width - characterLaneHeaderWidth - (horizontalPadding * 2)
+    private func timelineScrollableContent(currentRange: (start: Date, end: Date), geometry: GeometryProxy) -> some View {
+        let availableWidthForContent = geometry.size.width - eventTypeLaneHeaderWidth - (horizontalPadding * 2)
         let durationInDaysForRange = CGFloat(max(1, Calendar.current.dateComponents([.day], from: currentRange.start, to: currentRange.end).day ?? 1))
-        
         let minPixelsPerDayToFill = (availableWidthForContent > 0 && durationInDaysForRange > 0) ? (availableWidthForContent / durationInDaysForRange) : absoluteMinPixelsPerDay
         let effectivePixelsPerDay = max(currentPixelsPerDay, minPixelsPerDayToFill, absoluteMinPixelsPerDay)
         let actualTimelineContentWidth = calculateTotalTimelineContentWidth(for: currentRange, pixelsPerDayToUse: effectivePixelsPerDay)
-        
-        let totalWidthForZStack = max(geometry.size.width, actualTimelineContentWidth + characterLaneHeaderWidth + (horizontalPadding * 2))
-
+        let totalWidthForZStack = max(geometry.size.width, actualTimelineContentWidth + eventTypeLaneHeaderWidth + (horizontalPadding * 2))
+        let totalHeightForContent = calculateTotalHeight()
 
         ScrollView([.horizontal, .vertical]) {
             ZStack(alignment: .topLeading) {
-                tappableBackgroundLayer(totalWidth: totalWidthForZStack, totalHeight: calculateTotalHeight())
-                characterLaneVisualsLayer(totalWidth: totalWidthForZStack)
-                eventLayer(currentRange: currentRange, effectivePixelsPerDay: effectivePixelsPerDay, charIndices: charIndices)
-                characterArcLayer(currentRange: currentRange, effectivePixelsPerDay: effectivePixelsPerDay, charIndices: charIndices)
-                timeAxisLayer(currentRange: currentRange, actualTimelineContentWidth: actualTimelineContentWidth, effectivePixelsPerDay: effectivePixelsPerDay)
+                eventTypeLaneVisualsLayer(totalWidth: totalWidthForZStack).zIndex(0)
+                eventLayer(currentRange: currentRange, effectivePixelsPerDay: effectivePixelsPerDay).zIndex(1)
+                timeAxisLayer(currentRange: currentRange, actualTimelineContentWidth: actualTimelineContentWidth, effectivePixelsPerDay: effectivePixelsPerDay).zIndex(2)
             }
-            .frame(minWidth: geometry.size.width, idealWidth: totalWidthForZStack, maxWidth: totalWidthForZStack,
-                   minHeight: calculateTotalHeight(), idealHeight: calculateTotalHeight(), maxHeight: calculateTotalHeight())
-
-            .gesture(
-                MagnificationGesture()
-                    .updating($magnifyBy) { currentState, gestureState, transaction in
-                        gestureState = currentState
-                    }
-                    .onEnded { value in
-                        let newPixelsPerDay = currentPixelsPerDay * value
-                        withAnimation(.easeInOut) {
-                            currentPixelsPerDay = max(absoluteMinPixelsPerDay, min(maxPixelsPerDay, newPixelsPerDay))
-                        }
-                    }
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func tappableBackgroundLayer(totalWidth: CGFloat, totalHeight: CGFloat) -> some View {
-        Rectangle()
-            .fill(Color.clear)
-            .frame(width: totalWidth, height: totalHeight)
-            .contentShape(Rectangle())
+            .frame(width: totalWidthForZStack, height: totalHeightForContent)
+            .contentShape(Rectangle()) // This makes the background of the ZStack (scrollable content) tappable
             .onTapGesture {
+                // print("ScrollView ZStack content area TAPPED - Deselecting All") // Debug
                 deselectAllItems()
             }
-            .zIndex(-1)
+            .gesture(MagnificationGesture().updating($magnifyBy) { c, g, _ in g = c }.onEnded { v in withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, min(maxPixelsPerDay, currentPixelsPerDay * v)) } })
+        }
     }
 
     @ViewBuilder
-    private func characterLaneVisualsLayer(totalWidth: CGFloat) -> some View {
+    private func eventTypeLaneVisualsLayer(totalWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(characters.enumerated()), id: \.element.id) { index, character in
-                HStack {
-                    Text(character.name ?? "Unnamed Character")
-                        .font(.caption).padding(5)
-                        .frame(width: characterLaneHeaderWidth - 10, height: laneHeight, alignment: .leading)
-                        .background(index.isMultiple(of: 2) ? Color.gray.opacity(0.1) : Color.clear)
-                    Spacer()
-                }
-                .frame(width: totalWidth, height: laneHeight)
-                if index < characters.count - 1 {
-                    Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1).offset(x: characterLaneHeaderWidth)
-                }
+            ForEach(0..<eventTypesForLanes.count, id: \.self) { index in
+                let typeName = eventTypesForLanes[index]
+                HStack(spacing: 0) {
+                    Text(typeName).font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        .padding(.leading, 6).padding(.trailing, 4)
+                        .frame(width: eventTypeLaneHeaderWidth, height: laneHeight, alignment: .leading)
+                    Rectangle().fill(index.isMultiple(of: 2) ? Color.black.opacity(0.02) : Color.clear).frame(height: laneHeight)
+                }.frame(width: totalWidth, height: laneHeight)
+                Rectangle().fill(Color.gray.opacity(index == eventTypesForLanes.count - 1 ? 0.25 : 0.15))
+                    .frame(width:totalWidth - eventTypeLaneHeaderWidth, height: 1).offset(x: eventTypeLaneHeaderWidth)
             }
-            if !events.isEmpty || !characterArcs.isEmpty || characters.isEmpty {
-                HStack {
-                     Text(characters.isEmpty && events.filter { $0.participatingCharacters?.count == 0 }.isEmpty ? "Timeline" : "General Events")
-                        .font(.caption).padding(5)
-                        .frame(width: characterLaneHeaderWidth - 10, height: laneHeight, alignment: .leading)
-                        .background((characters.count).isMultiple(of: 2) ? Color.gray.opacity(0.1) : Color.clear)
-                    Spacer()
-                }
-                .frame(width: totalWidth, height: laneHeight)
-            }
-        }
-        .padding(.top, topOffsetForTimeAxis)
-        .zIndex(0)
+        }.padding(.top, topOffsetForTimeAxis)
     }
 
     @ViewBuilder
-    private func eventLayer(currentRange: (start: Date, end: Date), effectivePixelsPerDay: CGFloat, charIndices: [UUID: Int]) -> some View {
-        ForEach(events) { event in
-            if let eventDate = event.eventDate {
-                let participatingChars = (event.participatingCharacters as? Set<CharacterItem>) ?? Set()
-                let currentEventXPos = xPosition(for: eventDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                
-                if participatingChars.isEmpty {
-                    EventBlockView(
-                        event: event, displayCharacter: nil, pixelsPerDay: effectivePixelsPerDay,
-                        instantaneousEventWidth: instantaneousEventWidth,
-                        currentXPosition: currentEventXPos,
-                        timelineStartDate: currentRange.start,
-                        yPosition: findYPositionForEvent(event, onCharacter: nil, charIndices: charIndices, eventHeight: eventBlockBaseHeight),
-                        height: eventBlockBaseHeight,
-                        isSelected: self.selectedEventForDetail?.id == event.id,
-                        isBeingActivelyDragged: self.activelyDraggingEventID == event.id,
-                        onTap: {
-                            self.selectedArcForDetail = nil
-                            self.selectedEventForDetail = (self.selectedEventForDetail?.id == event.id ? nil : event)
-                            self.activelyDraggingEventID = nil; self.originalDateForDraggedEvent = nil
-                        },
-                        onDragStateChanged: { dragging, originalDate, newDate in
-                            handleEventDragStateChange(event: event, isDragging: dragging, originalDragStartDate: originalDate, newProvisionalDate: newDate)
-                        }
-                    )
-                    .environment(\.managedObjectContext, self.viewContext)
-                    .zIndex(self.selectedEventForDetail?.id == event.id || self.activelyDraggingEventID == event.id ? 2.5 : 2)
-                } else {
-                    ForEach(Array(participatingChars.sorted(by: { $0.name ?? "" < $1.name ?? "" })), id: \.self) { character in
-                        EventBlockView(
-                            event: event, displayCharacter: character, pixelsPerDay: effectivePixelsPerDay,
-                            instantaneousEventWidth: instantaneousEventWidth,
-                            currentXPosition: currentEventXPos,
-                            timelineStartDate: currentRange.start,
-                            yPosition: findYPositionForEvent(event, onCharacter: character, charIndices: charIndices, eventHeight: eventBlockBaseHeight),
-                            height: eventBlockBaseHeight,
-                            isSelected: self.selectedEventForDetail?.id == event.id,
-                            isBeingActivelyDragged: self.activelyDraggingEventID == event.id,
-                            onTap: {
-                                self.selectedArcForDetail = nil
-                                self.selectedEventForDetail = (self.selectedEventForDetail?.id == event.id ? nil : event)
-                                self.activelyDraggingEventID = nil; self.originalDateForDraggedEvent = nil
-                            },
-                            onDragStateChanged: { dragging, originalDate, newDate in
-                                handleEventDragStateChange(event: event, isDragging: dragging, originalDragStartDate: originalDate, newProvisionalDate: newDate)
-                            }
-                        )
-                        .environment(\.managedObjectContext, self.viewContext)
-                        .zIndex(self.selectedEventForDetail?.id == event.id && event.participatingCharacters?.contains(character) == true || self.activelyDraggingEventID == event.id ? 2.5 : 2)
-                    }
-                }
-            }
-        }
+    private func eventLayer(currentRange: (start: Date, end: Date), effectivePixelsPerDay: CGFloat) -> some View {
+        ForEach(events) { event in renderEventBlock(for: event, in: currentRange, pixelsPerDay: effectivePixelsPerDay) }
     }
 
     @ViewBuilder
-    private func characterArcLayer(currentRange: (start: Date, end: Date), effectivePixelsPerDay: CGFloat, charIndices: [UUID: Int]) -> some View {
-        ForEach(characterArcs) { arc in
-            if let char = arc.character, let charID = char.id, let charIndex = charIndices[charID],
-               let startEvent = arc.startEvent, let startDate = startEvent.eventDate,
-               let endEventUnwrapped = arc.endEvent, let endDate = endEventUnwrapped.eventDate {
-                
-                let arcStartX = xPosition(for: startDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                let endEventActualEndDate = Calendar.current.date(byAdding: .day, value: Int(endEventUnwrapped.durationDays), to: endDate) ?? endDate
-                let arcEndX = xPosition(for: endEventActualEndDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                
-                let peakX: CGFloat? = {
-                    if let peakEvent = arc.peakEvent, let peakDate = peakEvent.eventDate {
-                        return xPosition(for: peakDate, timelineStartDate: currentRange.start, currentPixelsPerDay: effectivePixelsPerDay)
-                    }
-                    return nil
-                }()
-                
-                let arcYPosition = topOffsetForTimeAxis + (CGFloat(charIndex) * laneHeight) + (laneHeight * 0.65)
-                
-                CharacterArcView(
-                    arc: arc,
-                    startX: arcStartX,
-                    endX: arcEndX,
-                    peakX: peakX,
-                    yPosition: arcYPosition,
-                    height: arcHeight,
-                    peakIndicatorHeight: peakIndicatorHeight,
-                    color: Color(hex: char.colorHex ?? "") ?? .purple.opacity(0.7),
-                    isSelected: self.selectedArcForDetail?.id == arc.id,
-                    onTap: {
-                        self.selectedEventForDetail = nil
-                        self.selectedArcForDetail = (self.selectedArcForDetail?.id == arc.id ? nil : arc)
-                    }
-                ).zIndex(1)
-            }
-        }
+    private func renderEventBlock(for event: EventItem, in currentRange: (start: Date, end: Date), pixelsPerDay: CGFloat) -> some View {
+        if let validEventDate = event.eventDate {
+            let currentEventXPos = xPosition(for: validEventDate, timelineStartDate: currentRange.start, currentPixelsPerDay: pixelsPerDay)
+            let trimmedEventType = event.type?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let eventTypeForLane = trimmedEventType?.nilIfEmpty() ?? unclassifiedEventsLaneName
+            let yPos = findYPositionForEvent(eventType: eventTypeForLane, eventHeight: eventBlockBaseHeight)
+            let isSelected = self.selectedEventForDetail?.id == event.id
+            let isActivelyBeingDragged = self.activelyDraggingEventID == event.id
+
+            EventBlockView( event: event, project: self.project, pixelsPerDay: pixelsPerDay,
+                instantaneousEventWidth: instantaneousEventWidth, currentXPosition: currentEventXPos,
+                timelineStartDate: currentRange.start, yPosition: yPos, height: eventBlockBaseHeight,
+                isSelected: isSelected, isBeingActivelyDragged: isActivelyBeingDragged,
+                onTap: { self.selectedEventForDetail = (isSelected ? nil : event); if !isSelected { self.activelyDraggingEventID = nil } },
+                onDragStateChanged: { dragging, oD, nD in handleEventDragStateChange(event:event,isDragging:dragging,originalDragStartDate:oD,currentProvisionalOrFinalDate:nD) }
+            ).environment(\.managedObjectContext, self.viewContext)
+            .zIndex(isSelected || isActivelyBeingDragged ? 1.5 : 1.0)
+        } else { EmptyView() }
     }
 
     @ViewBuilder
     private func timeAxisLayer(currentRange: (start: Date, end: Date), actualTimelineContentWidth: CGFloat, effectivePixelsPerDay: CGFloat) -> some View {
-        TimeAxisView(
-            startDate: currentRange.start,
-            endDate: currentRange.end,
-            totalWidth: actualTimelineContentWidth,
-            offsetX: 0,
-            pixelsPerDay: effectivePixelsPerDay
-        )
-        .frame(height: 40)
-        .padding(.horizontal, horizontalPadding)
-        .offset(x: characterLaneHeaderWidth, y: 10)
-        .zIndex(3)
+        TimeAxisView(startDate: currentRange.start, endDate: currentRange.end, totalWidth: actualTimelineContentWidth, offsetX: 0, pixelsPerDay: effectivePixelsPerDay)
+            .frame(height: 40).padding(.horizontal, horizontalPadding).offset(x: eventTypeLaneHeaderWidth, y: 10)
     }
-    
-    private func xPosition(for date: Date, timelineStartDate: Date, currentPixelsPerDay: CGFloat) -> CGFloat {
-        let daysFromStart = Calendar.current.dateComponents([.day], from: timelineStartDate, to: date).day ?? 0
-        return characterLaneHeaderWidth + CGFloat(daysFromStart) * currentPixelsPerDay + horizontalPadding
-    }
+}
 
-    private func calculateTotalHeight() -> CGFloat {
-        let numberOfCharacterLanes = characters.count
-        let generalEventsLanePresent = !events.isEmpty || !characterArcs.isEmpty || characters.isEmpty
-        let numberOfVisualLanes = numberOfCharacterLanes + (generalEventsLanePresent ? 1 : 0)
-        
-        let totalLanesHeight = CGFloat(max(1, numberOfVisualLanes)) * laneHeight
-        return totalLanesHeight + topOffsetForTimeAxis + 50
-    }
-    
-    private func findYPositionForEvent(_ event: EventItem, onCharacter character: CharacterItem?, charIndices: [UUID: Int], eventHeight: CGFloat) -> CGFloat {
-        let laneCenterY = laneHeight / 2
-        let eventBlockCenterY = eventHeight / 2
-        let yOffsetInLane = laneCenterY - eventBlockCenterY
-        
-        if let char = character, let charID = char.id, let charIndex = charIndices[charID] {
-            return topOffsetForTimeAxis + (CGFloat(charIndex) * laneHeight) + yOffsetInLane
-        } else {
-            return topOffsetForTimeAxis + (CGFloat(characters.count) * laneHeight) + yOffsetInLane
-        }
-    }
-} // End of TimelineView struct
-
-// MARK: - Nested EventBlockView (Ensure this is your latest enhanced version)
+// MARK: - Nested EventBlockView
 struct EventBlockView: View {
-    @ObservedObject var event: EventItem
-    let displayCharacter: CharacterItem?
-    let pixelsPerDay: CGFloat
-    let instantaneousEventWidth: CGFloat
-    let currentXPosition: CGFloat
-    let timelineStartDate: Date
-    let yPosition: CGFloat
-    let height: CGFloat
-    let isSelected: Bool
-    let isBeingActivelyDragged: Bool
-    let onTap: () -> Void
-    let onDragStateChanged: (Bool, Date?, Date?) -> Void
-    
+    @ObservedObject var event: EventItem; @ObservedObject var project: ProjectItem
+    let pixelsPerDay: CGFloat, instantaneousEventWidth: CGFloat, currentXPosition: CGFloat
+    let timelineStartDate: Date; let yPosition: CGFloat, height: CGFloat
+    let isSelected: Bool, isBeingActivelyDragged: Bool
+    let onTap: () -> Void; let onDragStateChanged: (Bool, Date?, Date?) -> Void
     @Environment(\.managedObjectContext) private var viewContext
-    @GestureState private var dragTranslation: CGSize = .zero
-    @State private var localIsDragging: Bool = false
-    @State private var originalDateOnDragStart: Date?
-
-    private var eventBackgroundColor: Color {
-        if let hex = event.eventColorHex, let color = Color(hex: hex) {
-            return color
-        }
-        if let char = displayCharacter, let hex = char.colorHex, let color = Color(hex: hex) {
-            return color
-        }
-        return .gray
-    }
-
-    private var shortDescription: String? {
-        guard let desc = event.eventDescription, !desc.isEmpty else { return nil }
-        let lines = desc.components(separatedBy: .newlines) // Changed from split(separator:)
-        return lines.first
-    }
-    
-    private var displayDateFormatter: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE d MMM"
-        return formatter
-    }
-
+    @State private var localIsDragging: Bool = false; @State private var originalDateOnDragStart: Date?
+    private var eventBlockBackgroundColor: Color { if let hex = event.eventColorHex, !hex.isEmpty, let color = Color(hex: hex) { return color }; return Color.blue.opacity(0.6) }
+    private var displayDateFormatter: DateFormatter { let formatter = DateFormatter(); formatter.dateFormat = "MMM d"; return formatter }
     var body: some View {
-        let currentEventWidth = calculateEventWidth()
-        let positioningX = currentXPosition + (currentEventWidth / 2) + dragTranslation.width
-
-        VStack(alignment: .leading, spacing: 2) {
-            Text(event.title ?? "Untitled Event")
-                .font(.system(size: 10, weight: .bold))
-                .lineLimit(1)
-            
-            if let date = event.eventDate, currentEventWidth > 40 {
-                Text(displayDateFormatter.string(from: date))
-                    .font(.system(size: 8))
-                    .opacity(0.8)
-            }
-
-            if let shortDesc = shortDescription, currentEventWidth > 60 {
-                Text(shortDesc)
-                    .font(.system(size: 8))
-                    .lineLimit(event.durationDays > 0 ? 2 : 1)
-                    .opacity(0.7)
-            }
+        let currentEventWidth = calculateEventWidth(); let centerXPosition = currentXPosition + (currentEventWidth / 2)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(event.title ?? "Untitled Event").font(.system(size: 11, weight: .semibold)).lineLimit(1).padding(.bottom, 1)
+            if let date = event.eventDate, currentEventWidth > 45 { Text(displayDateFormatter.string(from: date)).font(.system(size: 9, weight: .medium)).foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.6) ? .black.opacity(0.65) : .white.opacity(0.75)) }
+            HStack(spacing: 6) {
+                if let characters = event.participatingCharacters as? Set<CharacterItem>, !characters.isEmpty {
+                    HStack(spacing: -4) {
+                        ForEach(characters.sorted(by: { $0.name ?? "" < $1.name ?? "" }).prefix(5), id: \.self) { char in
+                            Circle().fill(Color(hex: char.colorHex ?? "") ?? .gray).frame(width: 10, height: 10)
+                                .overlay(Circle().stroke(eventBlockBackgroundColor.isLight() ? Color.white.opacity(0.8) : Color.black.opacity(0.3) , lineWidth: 0.75))
+                                .shadow(color: .black.opacity(0.2),radius: 0.5, x:0, y:0.5).help(char.name ?? "Unknown Character")
+                        }
+                        if characters.count > 5 { Text("+\(characters.count - 5)").font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.6) ? .black.opacity(0.7) : .white.opacity(0.8)).padding(.leading, 5) }
+                    }
+                } else { Spacer() }
+                if let locationName = event.locationName?.trimmingCharacters(in: .whitespacesAndNewlines), !locationName.isEmpty, currentEventWidth > (((event.participatingCharacters as? Set<CharacterItem>)?.isEmpty ?? true) ? 80 : 120) {
+                    if !((event.participatingCharacters as? Set<CharacterItem>)?.isEmpty ?? true) { Spacer() }
+                    HStack(spacing: 2) { Image(systemName: "mappin.and.ellipse").font(.system(size: 9)).foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.6) ? .black.opacity(0.6) : .white.opacity(0.7))
+                        Text(locationName).font(.system(size: 9)).foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.6) ? .black.opacity(0.6) : .white.opacity(0.7)).lineLimit(1).truncationMode(.tail)
+                    }
+                } else { if ((event.participatingCharacters as? Set<CharacterItem>)?.isEmpty ?? true) { Spacer() } }
+            }.frame(height: 12)
+            let summaryToShow = event.summaryLine?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty() ?? event.eventDescription?.components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty() ?? ""
+            if !summaryToShow.isEmpty, currentEventWidth > 25 { Text(summaryToShow).font(.system(size: 9)).lineLimit(height > 65 ? 2 : 1).truncationMode(.tail).foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.6) ? .black.opacity(0.75) : .white.opacity(0.85)).fixedSize(horizontal: false, vertical: true) }
+            Spacer(minLength: 0)
         }
-        .padding(EdgeInsets(top: 4, leading: 5, bottom: 4, trailing: 5))
+        .padding(EdgeInsets(top: 5, leading: 7, bottom: 5, trailing: 7))
         .frame(width: currentEventWidth, height: height, alignment: .topLeading)
-        .background(eventBackgroundColor.opacity(localIsDragging || isBeingActivelyDragged ? 0.7 : 1.0))
-        .foregroundColor(eventBackgroundColor.isLight() ? .black : .white) // Make sure Color+Extensions.isLight() exists
-        .cornerRadius(4)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(isSelected ? Color.blue.opacity(0.8) : Color.black.opacity(0.3), lineWidth: isSelected ? 2.5 : 0.7)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .scaleEffect(isSelected ? 1.03 : (localIsDragging || isBeingActivelyDragged ? 1.01 : 1.0))
+        .background(eventBlockBackgroundColor.opacity(localIsDragging || isBeingActivelyDragged ? 0.8 : 1.0))
+        .foregroundColor(eventBlockBackgroundColor.isLight(threshold: 0.55) ? .black.opacity(0.9) : .white.opacity(0.95))
+        .cornerRadius(7)
+        .shadow(color: Color.black.opacity(isSelected || localIsDragging || isBeingActivelyDragged ? 0.25 : 0.15), radius: isSelected ? 3 : 2, x: 0, y: isSelected ? 2 : 1.5)
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(isSelected ? Color.accentColor : Color.black.opacity(0.25), lineWidth: isSelected ? 2 : 0.75))
+        .contentShape(Rectangle()).onTapGesture(perform: onTap)
+        .scaleEffect(isSelected || localIsDragging || isBeingActivelyDragged ? 1.015 : 1.0)
         .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isSelected || localIsDragging || isBeingActivelyDragged)
-        .position(x: positioningX , y: yPosition)
+        .position(x: centerXPosition , y: yPosition)
         .gesture(
             DragGesture()
-                .onChanged { value in
-                    if !localIsDragging {
-                        originalDateOnDragStart = event.eventDate
-                        localIsDragging = true
-                    }
-                    let daysDragged = round(value.translation.width / pixelsPerDay)
-                    if let capturedOriginalDate = originalDateOnDragStart {
-                        let provisionalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: capturedOriginalDate)
-                        self.onDragStateChanged(true, capturedOriginalDate, provisionalNewDate)
-                    }
-                }
-                .updating($dragTranslation) { value, state, _ in
-                    state = value.translation
-                }
-                .onEnded { value in
-                    if let capturedOriginalDate = originalDateOnDragStart {
-                        let daysDragged = round(value.translation.width / pixelsPerDay)
-                        let finalNewDate = Calendar.current.date(byAdding: .day, value: Int(daysDragged), to: capturedOriginalDate)
-                        
-                        DispatchQueue.main.async {
-                            event.eventDate = finalNewDate
-                            do {
-                                if viewContext.hasChanges {
-                                    try viewContext.save()
-                                }
-                            } catch {
-                                let nsError = error as NSError
-                                print("Error saving dragged event: \(nsError), \(nsError.userInfo)")
-                                event.eventDate = capturedOriginalDate
-                            }
-                            self.onDragStateChanged(false, capturedOriginalDate, finalNewDate)
-                        }
-                    }
-                    self.localIsDragging = false
-                    self.originalDateOnDragStart = nil
-                }
+                .onChanged { value in if !localIsDragging { originalDateOnDragStart = event.eventDate; localIsDragging = true }; let days = round(value.translation.width / pixelsPerDay); if let oD = originalDateOnDragStart { let nD = Calendar.current.date(byAdding: .day, value: Int(days), to: oD)!; event.eventDate = nD; self.onDragStateChanged(true, oD, nD) } }
+                .onEnded { value in localIsDragging = false; if let oD = originalDateOnDragStart { let days = round(value.translation.width / pixelsPerDay); let fD = Calendar.current.date(byAdding: .day, value: Int(days), to: oD)!; event.eventDate = fD; DispatchQueue.main.async { do { if viewContext.hasChanges { try viewContext.save() }; self.onDragStateChanged(false, oD, event.eventDate) } catch { print("Err saving: \(error.localizedDescription)"); event.eventDate = oD; self.onDragStateChanged(false, oD, oD) } } }; originalDateOnDragStart = nil }
         )
     }
-    
     private func calculateEventWidth() -> CGFloat {
-        if event.durationDays == 0 {
-            return instantaneousEventWidth
-        } else {
-            return max(CGFloat(event.durationDays) * pixelsPerDay, instantaneousEventWidth * 2)
-        }
+        if event.durationDays == 0 { return max(instantaneousEventWidth, CGFloat(pixelsPerDay * 0.3)) }
+        else { return max(CGFloat(event.durationDays) * pixelsPerDay, instantaneousEventWidth * 1.5) }
     }
 }
 
-// MARK: - Other Nested Views (CharacterArcView, TimeAxisView)
-// These are assumed to be the same as your existing versions.
-
-struct CharacterArcView: View {
-    @ObservedObject var arc: CharacterArcItem
-    let startX: CGFloat
-    let endX: CGFloat
-    let peakX: CGFloat?
-    let yPosition: CGFloat
-    let height: CGFloat
-    let peakIndicatorHeight: CGFloat
-    let color: Color
-    let isSelected: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        let arcWidth = max(5, endX - startX)
-
-        return ZStack(alignment: .leading) {
-            Path { path in
-                path.move(to: CGPoint(x: 0, y: height / 2))
-                path.addLine(to: CGPoint(x: arcWidth, y: height / 2))
-            }
-            .stroke(color, style: StrokeStyle(lineWidth: isSelected ? height + 2 : height, lineCap: .butt))
-            .frame(width: arcWidth)
-            .overlay(
-                RoundedRectangle(cornerRadius: height / 2)
-                    .stroke(isSelected ? Color.yellow : Color.clear, lineWidth: 2)
-            )
-            
-            if arcWidth > 20 {
-                Text(arc.name ?? "Arc")
-                    .font(.system(size: 8, weight: .medium))
-                    .foregroundColor(isSelected ? .black : (color.isLight() ? color.darker(by: 0.6) : color.darker(by:0.4)))
-                    .padding(.horizontal, 2)
-                    .lineLimit(1)
-                    .frame(maxWidth: arcWidth - 4, alignment: .center)
-            }
-
-            if let pkX = peakX {
-                let relativePeakX = pkX - startX
-                if relativePeakX >= 0 && relativePeakX <= arcWidth {
-                    Path { path in
-                        path.move(to: CGPoint(x: relativePeakX, y: (height / 2) - (peakIndicatorHeight / 2)))
-                        path.addLine(to: CGPoint(x: relativePeakX, y: (height / 2) + (peakIndicatorHeight / 2)))
-                    }
-                    .stroke((color.isLight() ? color.darker(by: 0.5) : color.darker(by: 0.3)), style: StrokeStyle(lineWidth: 2.5, dash: [2,2]))
-                }
-            }
-        }
-        .frame(width: arcWidth, height: max(height, peakIndicatorHeight))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .scaleEffect(isSelected ? 1.05 : 1.0)
-        .animation(.spring(), value: isSelected)
-        .position(x: startX + arcWidth / 2, y: yPosition)
-    }
-}
-
+// MARK: - Nested TimeAxisView
 struct TimeAxisView: View {
-    let startDate: Date
-    let endDate: Date
-    let totalWidth: CGFloat
-    let offsetX: CGFloat
-    let pixelsPerDay: CGFloat
-    
+    let startDate: Date; let endDate: Date; let totalWidth: CGFloat; let offsetX: CGFloat; let pixelsPerDay: CGFloat
     private var calendar = Calendar.current
-
-    init(startDate: Date, endDate: Date, totalWidth: CGFloat, offsetX: CGFloat, pixelsPerDay: CGFloat) {
-        self.startDate = startDate
-        self.endDate = endDate
-        self.totalWidth = totalWidth
-        self.offsetX = offsetX
-        self.pixelsPerDay = pixelsPerDay
-    }
-
-    private var totalDays: Int {
-        max(0, calendar.dateComponents([.day], from: startDate, to: endDate).day ?? 0)
-    }
-
+    init(startDate: Date, endDate: Date, totalWidth: CGFloat, offsetX: CGFloat, pixelsPerDay: CGFloat) { self.startDate = startDate; self.endDate = endDate; self.totalWidth = totalWidth; self.offsetX = offsetX; self.pixelsPerDay = pixelsPerDay }
+    private var totalDays: Int { max(0, calendar.dateComponents([.day], from: startDate, to: endDate).day ?? 0) }
     var body: some View {
-        GeometryReader { geometryInternal in
-            Path { path in
-                path.move(to: CGPoint(x: offsetX, y: geometryInternal.size.height / 2))
-                path.addLine(to: CGPoint(x: offsetX + totalWidth, y: geometryInternal.size.height / 2))
-
-                if totalDays >= 0 {
-                    for dayOffset in 0...totalDays {
-                        let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
-                        if xPosInView >= offsetX && xPosInView <= offsetX + totalWidth + (pixelsPerDay / 2) {
-                            path.move(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 - 5))
-                            path.addLine(to: CGPoint(x: xPosInView, y: geometryInternal.size.height / 2 + 5))
-                        }
-                    }
-                }
-            }
-            .stroke(Color.gray, lineWidth: 1)
-
-            if totalDays >= 0 {
-                ForEach(0...totalDays, id: \.self) { dayOffset in
-                    if let dateForLabel = calendar.date(byAdding: .day, value: dayOffset, to: startDate) {
-                        let xPosInView = offsetX + CGFloat(dayOffset) * pixelsPerDay
-                        let labelFrequency = max(1, Int(80 / max(1,pixelsPerDay)))
-                        
-                        if dayOffset % labelFrequency == 0 && xPosInView >= offsetX && xPosInView <= offsetX + totalWidth {
-                            Text(dateFormatterForAxis.string(from: dateForLabel))
-                                .font(.caption2)
-                                .position(x: xPosInView, y: geometryInternal.size.height / 2 + 15)
-                                .fixedSize()
-                        }
-                    }
-                }
-            }
-        }
+        GeometryReader { g in Path { p in p.move(to: CGPoint(x:offsetX,y:g.size.height/2)); p.addLine(to:CGPoint(x:offsetX+totalWidth,y:g.size.height/2)); if totalDays >= 0 { for dO in 0...totalDays { let xP=offsetX+CGFloat(dO)*pixelsPerDay; if xP >= offsetX-(pixelsPerDay/2) && xP <= offsetX+totalWidth+(pixelsPerDay/2) { let dFT=calendar.date(byAdding:.day,value:dO,to:startDate)!; let iSOW=calendar.component(.weekday,from:dFT)==calendar.firstWeekday; let tH:CGFloat=iSOW ? 7:3.5; p.move(to:CGPoint(x:xP,y:g.size.height/2-tH/2)); p.addLine(to:CGPoint(x:xP,y:g.size.height/2+tH/2)) } } } }.stroke(Color.gray.opacity(0.6),lineWidth:0.7); ForEach(0...totalDays,id:\.self) { dO in viewForDateLabel(dayOffset:dO,geometry:g) } }
     }
-    
-    private var dateFormatterForAxis: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter
+    @ViewBuilder private func viewForDateLabel(dayOffset dO:Int,geometry g:GeometryProxy) -> some View {
+        if pixelsPerDay > 0, let dFL=calendar.date(byAdding:.day,value:dO,to:startDate) {
+            let xP=offsetX+CGFloat(dO)*pixelsPerDay; let(fmt,isSig)=getAppropriateFormatter(for:dFL,pixelsPerDay:pixelsPerDay,dayOffset:dO,startDate:startDate)
+            let iFM=calendar.component(.day,from:dFL)==1; let iSW=calendar.component(.weekday,from:dFL)==calendar.firstWeekday; let iFWD=calendar.component(.day,from:dFL) <= 7
+            if pixelsPerDay >= 65 { labelContentOrEmpty(f:fmt,d:dFL,x:xP,g:g,iS:isSig) }
+            else if pixelsPerDay >= 35 { if iSW || iFM { labelContentOrEmpty(f:fmt,d:dFL,x:xP,g:g,iS:isSig) } else {EmptyView()} }
+            else if pixelsPerDay >= 15 { if (iSW && iFWD) || iFM { labelContentOrEmpty(f:fmt,d:dFL,x:xP,g:g,iS:isSig) } else {EmptyView()} }
+            else { if iFM { labelContentOrEmpty(f:fmt,d:dFL,x:xP,g:g,iS:isSig) } else {EmptyView()} }
+        } else {EmptyView()}
+    }
+    @ViewBuilder private func labelContentOrEmpty(f fmt:DateFormatter,d dFL:Date,x xP:CGFloat,g geo:GeometryProxy,iS isSig:Bool)->some View {
+        let apW:CGFloat=pixelsPerDay > 35 ? 40:25; if xP+apW/2 >= offsetX && xP-apW/2 <= offsetX+totalWidth { Text(fmt.string(from:dFL)).font(isSig ? .system(size:9,weight:.medium):.system(size:8)).foregroundColor(Color.secondary).lineLimit(1).fixedSize().position(x:xP,y:geo.size.height/2+(isSig ? 13:11)).padding(.horizontal,1) } else {EmptyView()}
+    }
+    private func getAppropriateFormatter(for d:Date,pixelsPerDay pPD:CGFloat,dayOffset dO:Int,startDate sD:Date)->(DateFormatter,Bool) {
+        let fmt=DateFormatter();var iS=false; if pPD >= 65 {fmt.dateFormat="EEE d";if calendar.component(.weekday,from:d)==calendar.firstWeekday||calendar.component(.day,from:d)==1 {iS=true}} else if pPD >= 35 {fmt.dateFormat="MMM d";if calendar.component(.day,from:d)==1 {iS=true}} else if pPD >= 15 {if calendar.component(.day,from:d)==1||(dO==0&&calendar.isDate(d,inSameDayAs:sD)){fmt.dateFormat="MMM";iS=true}else{fmt.dateFormat="d"}} else{fmt.dateFormat="MMM";iS=true}; return(fmt,iS)
     }
 }
 
-struct TimelineView_Previews: PreviewProvider {
-    static var previews: some View {
-        let context = PersistenceController.preview.container.viewContext
-        let sampleProject = ProjectItem(context: context)
-        sampleProject.title = "Sample Project"
-        
-        let char1 = CharacterItem(context: context); char1.id = UUID(); char1.name = "Alice"; char1.colorHex = "#E91E63"; char1.project = sampleProject
-        
-        let event1 = EventItem(context: context); event1.id = UUID(); event1.title = "Event 1: Long Title to Test Display"; event1.eventDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()); event1.durationDays = 2; event1.project = sampleProject; event1.eventDescription = "Desc line 1.\nDesc line 2."; event1.eventColorHex = "#3498DB"; event1.addToParticipatingCharacters(char1)
-        let event2 = EventItem(context: context); event2.id = UUID(); event2.title = "Event 2"; event2.eventDate = Calendar.current.date(byAdding: .day, value: 4, to: Date()); event2.durationDays = 0; event2.project = sampleProject;
-
-        return TimelineView(project: sampleProject, selection: .constant(.timeline))
-            .environment(\.managedObjectContext, context)
-            .frame(width: 800, height: 600)
+// String extension for nilIfEmpty
+extension String {
+    func nilIfEmpty() -> String? {
+        let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

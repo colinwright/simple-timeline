@@ -2,136 +2,113 @@ import SwiftUI
 import CoreData
 
 struct EditEventView: View {
-    // 1. The event we are editing
     @ObservedObject var event: EventItem
 
-    // 2. Core Data context
     @Environment(\.managedObjectContext) private var viewContext
-
-    // 3. Dismiss action for the sheet
     @Environment(\.dismiss) var dismiss
 
-    // 4. State variables, initialized with the event's current details
     @State private var eventTitle: String
     @State private var eventDate: Date
+    @State private var eventType: String
+    @State private var eventLocation: String
+    @State private var eventSummaryLine: String
     @State private var eventDescription: String
-    @State private var durationDays: Int // Will be initialized from event.durationDays
+    @State private var durationDays: Int
+    @State private var eventColorHex: String
 
-    // 5. Fetch characters for the current project to select participants
     @FetchRequest private var projectCharacters: FetchedResults<CharacterItem>
-    
-    // 6. State to hold the set of selected character IDs for this event
     @State private var selectedCharacterIDs: Set<UUID>
 
-    // Initializer to load event data and set up character selection
     init(event: EventItem) {
-        _event = ObservedObject(initialValue: event)
+        self.event = event
         _eventTitle = State(initialValue: event.title ?? "")
         _eventDate = State(initialValue: event.eventDate ?? Date())
+        _eventType = State(initialValue: event.type ?? "")
+        _eventLocation = State(initialValue: event.locationName ?? "")
+        _eventSummaryLine = State(initialValue: event.summaryLine ?? "")
         _eventDescription = State(initialValue: event.eventDescription ?? "")
-        // Initialize duration directly from the event's value (can be 0)
         _durationDays = State(initialValue: Int(event.durationDays))
+        _eventColorHex = State(initialValue: event.eventColorHex ?? "")
 
-
-        // Fetch characters belonging to the event's project
-        let projectPredicate: NSPredicate
-        if let project = event.project {
-            projectPredicate = NSPredicate(format: "project == %@", project)
-        } else {
-            // Fallback if event somehow has no project (should not happen with current model)
-            print("Warning: Event being edited has no associated project. Character list will be empty.")
-            projectPredicate = NSPredicate(format: "FALSEPREDICATE")
-        }
-        
+        // Ensure event.project is not nil before using in predicate
+        // If event.project could be nil, you might need a more robust fallback or handling.
+        // For this context, we assume event.project is valid.
+        let projectForFetch = event.project!
+        let projectPredicate = NSPredicate(format: "project == %@", projectForFetch)
         _projectCharacters = FetchRequest<CharacterItem>(
             sortDescriptors: [NSSortDescriptor(keyPath: \CharacterItem.name, ascending: true)],
-            predicate: projectPredicate,
-            animation: .default
-        )
-        
-        // Initialize selectedCharacterIDs with characters already participating in the event
-        var initialSelectedIDs = Set<UUID>()
-        if let participating = event.participatingCharacters as? Set<CharacterItem> {
-            for character in participating {
-                if let charID = character.id {
-                    initialSelectedIDs.insert(charID)
-                }
-            }
-        }
-        _selectedCharacterIDs = State(initialValue: initialSelectedIDs)
+            predicate: projectPredicate, animation: .default )
+        _selectedCharacterIDs = State(initialValue: Set((event.participatingCharacters as? Set<CharacterItem>)?.compactMap { $0.id } ?? []))
+    }
+    
+    // Corrected fieldLabel function
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundColor(.gray)
+            .padding(.bottom, -3) // Keep existing padding
     }
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("Event Details").font(.headline)) {
-                    TextField("Event Title", text: $eventTitle)
-                    DatePicker("Event Date", selection: $eventDate)
-                    
-                    // Stepper for duration in days, now starting from 0
-                    Stepper("Duration: \(durationDays) day(s)", value: $durationDays, in: 0...365)
+                Section(header: Text("Core Event Details").font(.headline)) {
+                    VStack(alignment: .leading) { fieldLabel("Title*"); TextField("Event Title", text: $eventTitle) }
+                    VStack(alignment: .leading) { fieldLabel("Date*"); DatePicker("Event Date", selection: $eventDate, displayedComponents: .date).labelsHidden() }
+                    VStack(alignment: .leading) { fieldLabel("Duration"); Stepper("\(durationDays) day(s)", value: $durationDays, in: 0...365) }
+                }
+                
+                Section(header: Text("Categorization & Location").font(.headline)) {
+                    VStack(alignment: .leading) { fieldLabel("Type"); TextField("Event Type (Optional)", text: $eventType) }
+                    VStack(alignment: .leading) { fieldLabel("Color Hex (Optional)"); TextField("Hex Color Code", text: $eventColorHex) }
+                    VStack(alignment: .leading) { fieldLabel("Location (Optional)"); TextField("Location Name", text: $eventLocation) }
+                }
 
-                    Section(header: Text("Description (Optional)")) {
-                        TextEditor(text: $eventDescription)
-                            .frame(height: 100)
-                            .border(Color.gray.opacity(0.3), width: 1)
+                Section(header: Text("Content").font(.headline)) {
+                    VStack(alignment: .leading) {
+                        fieldLabel("Summary Line (for timeline block display)")
+                        TextField("One-line summary (Optional)", text: $eventSummaryLine, axis: .vertical).lineLimit(1...2).frame(minHeight:30)
+                    }
+                    VStack(alignment: .leading) {
+                        fieldLabel("Full Description (Optional)")
+                        TextEditor(text: $eventDescription).frame(minHeight: 80, idealHeight: 100).border(Color.gray.opacity(0.2))
                     }
                 }
                 
-                // Section for selecting participating characters
                 if !projectCharacters.isEmpty {
-                    Section(header: Text("Participating Characters").font(.headline)) {
-                        List(projectCharacters, id: \.self) { character in
-                            HStack {
-                                Text(character.name ?? "Unnamed Character")
-                                if let hex = character.colorHex, let color = Color(hex: hex) {
-                                    Circle().fill(color).frame(width: 8, height: 8)
+                    Section(header: Text("Participating Characters (\(selectedCharacterIDs.count))")) {
+                        List {
+                            ForEach(projectCharacters) { character in
+                                Button(action: { toggleCharacterSelection(character) }) {
+                                    HStack {
+                                        Image(systemName: selectedCharacterIDs.contains(character.id!) ? "checkmark.circle.fill" : "circle")
+                                            .foregroundColor(selectedCharacterIDs.contains(character.id!) ? .accentColor : .gray)
+                                        Text(character.name ?? "Unnamed")
+                                        Spacer()
+                                        if let hex = character.colorHex, let color = Color(hex: hex) {
+                                            Circle().fill(color).frame(width: 8, height: 8)
+                                        }
+                                    }
                                 }
-                                Spacer()
-                                if selectedCharacterIDs.contains(character.id!) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.accentColor)
-                                } else {
-                                    Image(systemName: "circle")
-                                        .foregroundColor(.gray)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                toggleCharacterSelection(character)
+                                .buttonStyle(.plain)
                             }
                         }
-                        // Optional: Limit height if character list can be very long
-                        // .frame(maxHeight: 250)
-                    }
-                } else {
-                     Section(header: Text("Participating Characters").font(.headline)) {
-                        let projectHasCharacters = (event.project?.characters as? Set<CharacterItem>)?.isEmpty == false
-                        Text(projectHasCharacters ? "No characters currently selected for this event." : "No characters in this project. Add characters in the 'Characters' tab first.")
-                            .foregroundColor(.secondary)
+                        .frame(minHeight: 50, maxHeight: 150)
                     }
                 }
             }
-            .padding() // Add padding around the Form
+            .padding()
             .navigationTitle("Edit Event: \(event.title ?? "")")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save Changes") {
-                        saveChanges()
-                        dismiss()
-                    }
+                    Button("Save Changes") { saveChanges(); dismiss() }
                     .disabled(eventTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
-        // Apply a frame to the NavigationView, which is the root content of the sheet
         .frame(minWidth: 480, idealWidth: 550, maxWidth: 700,
-               minHeight: 450, idealHeight: 600, maxHeight: 750)
+               minHeight: 500, idealHeight: 650, maxHeight: 800)
     }
 
     private func toggleCharacterSelection(_ character: CharacterItem) {
@@ -147,48 +124,68 @@ struct EditEventView: View {
         withAnimation {
             event.title = eventTitle.trimmingCharacters(in: .whitespacesAndNewlines)
             event.eventDate = eventDate
-            event.eventDescription = eventDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-            event.durationDays = Int16(durationDays) // Save duration (can be 0)
-
-            // Update participating characters
-            let selectedChars = projectCharacters.filter { selectedCharacterIDs.contains($0.id!) }
-            event.participatingCharacters = NSSet(array: selectedChars)
             
-            do {
-                try viewContext.save()
-            } catch {
-                let nsError = error as NSError
-                print("Unresolved error saving event changes: \(nsError), \(nsError.userInfo)")
+            let trimmedType = eventType.trimmingCharacters(in: .whitespacesAndNewlines)
+            event.type = trimmedType.isEmpty ? nil : trimmedType
+            
+            let trimmedLocation = eventLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            event.locationName = trimmedLocation.isEmpty ? nil : trimmedLocation
+            
+            let trimmedSummary = eventSummaryLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            event.summaryLine = trimmedSummary.isEmpty ? nil : trimmedSummary
+            
+            event.eventDescription = eventDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            event.durationDays = Int16(durationDays)
+
+            let trimmedHex = eventColorHex.trimmingCharacters(in: .whitespacesAndNewlines)
+            event.eventColorHex = (!trimmedHex.isEmpty && Color(hex: trimmedHex) != nil) ? trimmedHex : nil
+            
+            event.participatingCharacters = NSSet(array: projectCharacters.filter { selectedCharacterIDs.contains($0.id!) })
+            
+            if viewContext.hasChanges {
+                do {
+                    try viewContext.save()
+                } catch {
+                    let nsError = error as NSError
+                    // Consider more robust error handling for the user
+                    print("Unresolved error saving event changes: \(nsError), \(nsError.userInfo)")
+                }
             }
         }
     }
 }
 
+// Corrected PreviewProvider
 struct EditEventView_Previews: PreviewProvider {
     static var previews: some View {
+        // Create a dummy context and a sample project and event for the preview
         let context = PersistenceController.preview.container.viewContext
         let sampleProject = ProjectItem(context: context)
-        sampleProject.title = "Preview Project for Event Edit"
-        sampleProject.id = UUID()
-
-        let char1 = CharacterItem(context: context)
-        char1.id = UUID()
-        char1.name = "Alice (Editor)"
-        char1.colorHex = "#FF00AA"
-        char1.project = sampleProject
-        
-        let char2 = CharacterItem(context: context)
-        char2.id = UUID()
-        char2.name = "Bob (Editor)"
-        char2.colorHex = "#00FFAA"
-        char2.project = sampleProject
+        sampleProject.title = "Preview Project for Editing"
+        sampleProject.id = UUID() // Ensure ID is set if used by FetchRequest predicate indirectly
 
         let sampleEvent = EventItem(context: context)
-        sampleEvent.title = "Event to Edit"
+        sampleEvent.title = "Event Being Edited"
         sampleEvent.eventDate = Date()
-        sampleEvent.durationDays = 0 // Example of a 0-day event for preview
-        sampleEvent.project = sampleProject
-        sampleEvent.participatingCharacters = NSSet(array: [char1])
+        sampleEvent.project = sampleProject // Associate with project
+        sampleEvent.summaryLine = "A preview summary."
+
+        // Add a sample character so the FetchRequest for projectCharacters doesn't fail or result in empty list if UI depends on it
+        let sampleCharacter = CharacterItem(context: context)
+        sampleCharacter.name = "Preview Character"
+        sampleCharacter.project = sampleProject
+        sampleCharacter.id = UUID()
+        
+        // Ensure the context is saved if your init relies on persisted project for FetchRequest
+        // For previews, sometimes it's simpler if the FetchRequest predicate is very basic or
+        // if the objects are fully set up.
+        // Forcing a save here to ensure the event.project is resolvable.
+        do {
+            try context.save()
+        } catch {
+            print("Error saving preview context: \(error)")
+        }
+
 
         return EditEventView(event: sampleEvent)
             .environment(\.managedObjectContext, context)

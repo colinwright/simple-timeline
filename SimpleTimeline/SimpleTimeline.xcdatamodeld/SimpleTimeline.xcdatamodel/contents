@@ -36,6 +36,7 @@
         <attribute name="eventDescription" optional="YES" attributeType="String"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="locationName" optional="YES" attributeType="String"/>
+        <attribute name="summaryLine" optional="YES" attributeType="String"/>
         <attribute name="title" optional="YES" attributeType="String"/>
         <attribute name="type" optional="YES" attributeType="String"/>
         <relationship name="arcsEnded" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="CharacterArcItem" inverseName="endEvent" inverseEntity="CharacterArcItem"/>
