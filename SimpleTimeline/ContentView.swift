@@ -1,7 +1,8 @@
+// ContentView.swift
+
 import SwiftUI
 import CoreData
 
-// The MainViewSelection enum now includes a state for the project's home page.
 enum MainViewSelection {
     case projectHome, characters, wiki, timeline
 }
@@ -15,51 +16,30 @@ struct ContentView: View {
     private var projects: FetchedResults<ProjectItem>
     
     @State private var activeProject: ProjectItem?
-    
-    // Default selection is now the project's home page.
     @State private var selection: MainViewSelection = .projectHome
-    
     @State private var showingSettings = false
 
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 16) {
-                // This group contains the main project-specific navigation buttons.
                 Group {
-                    // New "Project" button to go to the project's landing page
                     Button(action: { selection = .projectHome }) {
-                        sidebarButtonContent(
-                            title: "Project",
-                            systemImage: "doc.text.image",
-                            isSelected: selection == .projectHome
-                        )
+                        sidebarButtonContent(title: "Project", systemImage: "doc.text.image", isSelected: selection == .projectHome)
                     }
                     .buttonStyle(.plain)
 
                     Button(action: { selection = .characters }) {
-                        sidebarButtonContent(
-                            title: "Characters",
-                            systemImage: "person.3",
-                            isSelected: selection == .characters
-                        )
+                        sidebarButtonContent(title: "Characters", systemImage: "person.3", isSelected: selection == .characters)
                     }
                     .buttonStyle(.plain)
 
                     Button(action: { selection = .wiki }) {
-                        sidebarButtonContent(
-                            title: "Wiki",
-                            systemImage: "book.closed",
-                            isSelected: selection == .wiki
-                        )
+                        sidebarButtonContent(title: "Wiki", systemImage: "book.closed", isSelected: selection == .wiki)
                     }
                     .buttonStyle(.plain)
 
                     Button(action: { selection = .timeline }) {
-                        sidebarButtonContent(
-                            title: "Timeline",
-                            systemImage: "chart.bar.xaxis",
-                            isSelected: selection == .timeline
-                        )
+                        sidebarButtonContent(title: "Timeline", systemImage: "chart.bar.xaxis", isSelected: selection == .timeline)
                     }
                     .buttonStyle(.plain)
                 }
@@ -68,22 +48,13 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                // Renamed "Projects" button to "Home"
                 Button(action: { activeProject = nil }) {
-                    sidebarButtonContent(
-                        title: "Home",
-                        systemImage: "house",
-                        isSelected: activeProject == nil
-                    )
+                    sidebarButtonContent(title: "Home", systemImage: "house", isSelected: activeProject == nil)
                 }
                 .buttonStyle(.plain)
                 
                 Button(action: { showingSettings = true }) {
-                    sidebarButtonContent(
-                        title: "Settings",
-                        systemImage: "gearshape",
-                        isSelected: false
-                    )
+                    sidebarButtonContent(title: "Settings", systemImage: "gearshape", isSelected: false)
                 }
                 .buttonStyle(.plain)
             }
@@ -91,25 +62,36 @@ struct ContentView: View {
             .padding(.bottom, 20)
             
         } detail: {
-            if let project = activeProject {
-                // The switch now includes the new .projectHome case
-                switch selection {
-                case .projectHome:
-                    ProjectHomeView(project: project)
-                case .characters:
-                    CharacterListView(project: project, selection: $selection)
-                case .wiki:
-                    WikiView(project: project, selection: $selection)
-                case .timeline:
-                    TimelineView(project: project, selection: $selection)
+            // UPDATED: The ZStack now has a frame modifier to ensure it fills the entire space.
+            ZStack {
+                // This background layer is now guaranteed to be the size of the window's detail area.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        NotificationCenter.default.post(name: .deselectTimelineItems, object: nil)
+                    }
+
+                // The content sits on top.
+                if let project = activeProject {
+                    switch selection {
+                    case .projectHome:
+                        ProjectHomeView(project: project)
+                    case .characters:
+                        CharacterListView(project: project, selection: $selection)
+                    case .wiki:
+                        WikiView(project: project, selection: $selection)
+                    case .timeline:
+                        TimelineView(project: project, selection: $selection)
+                    }
+                } else {
+                    ProjectSelectionView(
+                        projects: projects,
+                        activeProject: $activeProject,
+                        addProjectAction: addProject
+                    )
                 }
-            } else {
-                ProjectSelectionView(
-                    projects: projects,
-                    activeProject: $activeProject,
-                    addProjectAction: addProject
-                )
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity) // This is the critical missing piece.
         }
         .navigationSplitViewColumnWidth(80)
         .sheet(isPresented: $showingSettings) {
@@ -152,7 +134,6 @@ struct ContentView: View {
             newProject.title = "New Project \(projects.count + 1)"
             
             activeProject = newProject
-            // When a new project is created, go directly to its home/edit page.
             selection = .projectHome
             
             do {
@@ -162,12 +143,5 @@ struct ContentView: View {
                 fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
             }
         }
-    }
-}
-
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
-            .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
     }
 }

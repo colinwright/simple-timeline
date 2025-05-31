@@ -1,3 +1,5 @@
+// TimelineView.swift
+
 import SwiftUI
 import CoreData
 import Combine // Required for .onReceive
@@ -12,13 +14,11 @@ struct TimelineView: View {
     @FetchRequest private var characters: FetchedResults<CharacterItem>
     @FetchRequest private var characterArcs: FetchedResults<CharacterArcItem>
 
-    // For Event Type Lanes
+    // ... (State variables and other properties are unchanged) ...
     @State private var eventTypesForLanes: [String] = []
     @State private var eventTypeIndices: [String: Int] = [:]
     private let unclassifiedEventsLaneName = "Uncategorized"
     private let eventTypeLaneHeaderWidth: CGFloat = 150
-
-    // Timeline drawing constants
     private let eventBlockBaseHeight: CGFloat = 75
     private let arcHeight: CGFloat = 8
     private let peakIndicatorHeight: CGFloat = 12
@@ -27,17 +27,11 @@ struct TimelineView: View {
     private let instantaneousEventWidth: CGFloat = 10
     private let topOffsetForTimeAxis: CGFloat = 50
     private let detailPanelWidth: CGFloat = 280
-
-    // State for zoom level
     @State private var currentPixelsPerDay: CGFloat = 60
     private let absoluteMinPixelsPerDay: CGFloat = 10
     private let maxPixelsPerDay: CGFloat = 300
     private let zoomFactor: CGFloat = 1.4
-
-    // For Magnification Gesture
     @GestureState private var magnifyBy: CGFloat = 1.0
-
-    // State for selected items
     @State private var selectedEventForDetail: EventItem?
     @State private var selectedArcForDetail: CharacterArcItem?
     @State private var activelyDraggingEventID: UUID?
@@ -83,8 +77,12 @@ struct TimelineView: View {
                 .animation(.easeInOut(duration: 0.2), value: selectedEventForDetail != nil || activelyDraggingEventID != nil)
             }
         }
+        // NOTE: No .frame modifier here. The view now shrink-wraps its content.
         .onAppear {
             buildEventTypeLanesAndIndices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deselectTimelineItems)) { _ in
+            deselectAllItems()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSManagedObjectContext.didSaveObjectsNotification, object: viewContext)) { notification in
             var rebuildLanes = false
@@ -108,52 +106,39 @@ struct TimelineView: View {
     }
 
     private var timelinePanel: some View {
-        ZStack {
-            // This is the primary background tap catcher for the entire panel.
-            // It's at the bottom of the ZStack.
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    // print("TimelinePanel root ZStack background tapped") // Debug
-                    deselectAllItems()
-                }
-
-            // All other content of the panel is in this VStack, drawn on top.
-            VStack(alignment: .leading, spacing: 8) {
-                DetailViewHeader {
-                    BreadcrumbView(
-                        projectTitle: project.title ?? "Untitled Project",
-                        currentViewName: "Timeline",
-                        isProjectTitleClickable: true,
-                        projectHomeAction: { selection = .projectHome }
-                    )
-                } trailing: {
-                    HStack {
-                        Button { addNewEvent() } label: { Label("Add Event", systemImage: "plus.circle.fill").labelStyle(.iconOnly) }.help("Add New Event")
-                        Button { withAnimation(.easeInOut) { currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor) } } label: { Label("Zoom In", systemImage: "plus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("+", modifiers: .command).help("Zoom In")
-                        Button { withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor) } } label: { Label("Zoom Out", systemImage: "minus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("-", modifiers: .command).help("Zoom Out")
-                    }
-                }
-                
-                if events.isEmpty && eventTypesForLanes.isEmpty {
-                     Text("No events. Add an event to start your timeline.")
-                        .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
-                } else if let currentRange = dateRange {
-                    GeometryReader { geometry in
-                        timelineScrollableContent(currentRange: currentRange, geometry: geometry)
-                    }
-                } else {
-                     Text("Add events with dates to build the timeline.")
-                        .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
+        VStack(alignment: .leading, spacing: 8) {
+            DetailViewHeader {
+                BreadcrumbView(
+                    projectTitle: project.title ?? "Untitled Project",
+                    currentViewName: "Timeline",
+                    isProjectTitleClickable: true,
+                    projectHomeAction: { selection = .projectHome }
+                )
+            } trailing: {
+                HStack {
+                    Button { addNewEvent() } label: { Label("Add Event", systemImage: "plus.circle.fill").labelStyle(.iconOnly) }.help("Add New Event")
+                    Button { withAnimation(.easeInOut) { currentPixelsPerDay = min(maxPixelsPerDay, currentPixelsPerDay * zoomFactor) } } label: { Label("Zoom In", systemImage: "plus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("+", modifiers: .command).help("Zoom In")
+                    Button { withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, currentPixelsPerDay / zoomFactor) } } label: { Label("Zoom Out", systemImage: "minus.magnifyingglass").labelStyle(.iconOnly) }.keyboardShortcut("-", modifiers: .command).help("Zoom Out")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // By default, this VStack should allow taps on its transparent areas
-            // to pass through to the Color.clear layer behind it.
+            
+            if events.isEmpty && eventTypesForLanes.isEmpty {
+                 Text("No events. Add an event to start your timeline.")
+                    .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
+            } else if let currentRange = dateRange {
+                GeometryReader { geometry in
+                    timelineScrollableContent(currentRange: currentRange, geometry: geometry)
+                }
+            } else {
+                 Text("Add events with dates to build the timeline.")
+                    .foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center).padding()
+            }
         }
+        // NOTE: No .frame modifier here either.
     }
     
     // MARK: - Data Handling & Calculations
+    // ... (This section is unchanged)
     private func buildEventTypeLanesAndIndices() {
         let typesFromEvents = Set(events.compactMap { $0.type?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty() })
         var sortedUniqueTypes = Array(typesFromEvents).sorted()
@@ -165,7 +150,6 @@ struct TimelineView: View {
         self.eventTypesForLanes = sortedUniqueTypes
         var indices: [String: Int] = [:]; self.eventTypesForLanes.enumerated().forEach { indices[$1] = $0 }; self.eventTypeIndices = indices
     }
-        
     private var dateRange: (start: Date, end: Date)? {
         var allDates: [Date] = []; let calendar = Calendar.current
         events.forEach { event in if let date = event.eventDate { allDates.append(date); allDates.append(calendar.date(byAdding: .day, value: Int(event.durationDays), to: date) ?? date) } }
@@ -182,28 +166,26 @@ struct TimelineView: View {
         if paddedStartDate >= paddedEndDate { paddedEndDate = calendar.date(byAdding: .day, value: 7, to: paddedStartDate)! }
         return (paddedStartDate, paddedEndDate)
     }
-
     private func calculateTotalTimelineContentWidth(for range: (start: Date, end: Date), pixelsPerDayToUse: CGFloat) -> CGFloat {
         CGFloat(max(1, Calendar.current.dateComponents([.day], from: range.start, to: range.end).day ?? 1)) * pixelsPerDayToUse
     }
-
     private func xPosition(for date: Date, timelineStartDate: Date, currentPixelsPerDay: CGFloat) -> CGFloat {
         eventTypeLaneHeaderWidth + CGFloat(Calendar.current.dateComponents([.day], from: timelineStartDate, to: date).day ?? 0) * currentPixelsPerDay + horizontalPadding
     }
-
     private func findYPositionForEvent(eventType: String, eventHeight: CGFloat) -> CGFloat {
         let laneIndex = eventTypeIndices[eventType] ?? eventTypesForLanes.firstIndex(of: unclassifiedEventsLaneName) ?? (eventTypesForLanes.indices.last ?? 0)
         let laneTopY = topOffsetForTimeAxis + (CGFloat(laneIndex) * laneHeight)
         return laneTopY + (laneHeight / 2)
     }
-
     private func calculateTotalHeight() -> CGFloat {
         let numberOfVisualLanes = max(1, eventTypesForLanes.count)
         let totalLanesHeight = CGFloat(numberOfVisualLanes) * laneHeight
         return totalLanesHeight + topOffsetForTimeAxis + 50
     }
 
+
     // MARK: - UI Actions
+    // ... (This section is unchanged)
     private func addNewEvent() {
         withAnimation {
             let newEvent = EventItem(context: viewContext); newEvent.id = UUID(); newEvent.title = "New Event"
@@ -224,7 +206,9 @@ struct TimelineView: View {
         } else { self.activelyDraggingEventID = nil; if let currentlySelected = self.selectedEventForDetail, currentlySelected.id == event.id { let refreshedEvent = event; self.selectedEventForDetail = nil; DispatchQueue.main.async { self.selectedEventForDetail = refreshedEvent } } }
     }
 
+
     // MARK: - Scrollable Content & Layers
+    // ... (This section is unchanged from our very first working version)
     @ViewBuilder
     private func timelineScrollableContent(currentRange: (start: Date, end: Date), geometry: GeometryProxy) -> some View {
         let availableWidthForContent = geometry.size.width - eventTypeLaneHeaderWidth - (horizontalPadding * 2)
@@ -242,15 +226,20 @@ struct TimelineView: View {
                 timeAxisLayer(currentRange: currentRange, actualTimelineContentWidth: actualTimelineContentWidth, effectivePixelsPerDay: effectivePixelsPerDay).zIndex(2)
             }
             .frame(width: totalWidthForZStack, height: totalHeightForContent)
-            .contentShape(Rectangle()) // This makes the background of the ZStack (scrollable content) tappable
+            .contentShape(Rectangle())
             .onTapGesture {
-                // print("ScrollView ZStack content area TAPPED - Deselecting All") // Debug
                 deselectAllItems()
             }
-            .gesture(MagnificationGesture().updating($magnifyBy) { c, g, _ in g = c }.onEnded { v in withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, min(maxPixelsPerDay, currentPixelsPerDay * v)) } })
         }
+        .background(
+            Color.clear.contentShape(Rectangle()).onTapGesture {
+                deselectAllItems()
+            }
+        )
+        .gesture(MagnificationGesture().updating($magnifyBy) { c, g, _ in g = c }.onEnded { v in withAnimation(.easeInOut) { currentPixelsPerDay = max(absoluteMinPixelsPerDay, min(maxPixelsPerDay, currentPixelsPerDay * v)) } })
     }
-
+    
+    // ... (Rest of file is unchanged) ...
     @ViewBuilder
     private func eventTypeLaneVisualsLayer(totalWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -302,6 +291,7 @@ struct TimelineView: View {
 }
 
 // MARK: - Nested EventBlockView
+// ... (Unchanged)
 struct EventBlockView: View {
     @ObservedObject var event: EventItem; @ObservedObject var project: ProjectItem
     let pixelsPerDay: CGFloat, instantaneousEventWidth: CGFloat, currentXPosition: CGFloat
@@ -363,7 +353,9 @@ struct EventBlockView: View {
     }
 }
 
+
 // MARK: - Nested TimeAxisView
+// ... (Unchanged)
 struct TimeAxisView: View {
     let startDate: Date; let endDate: Date; let totalWidth: CGFloat; let offsetX: CGFloat; let pixelsPerDay: CGFloat
     private var calendar = Calendar.current
@@ -390,7 +382,9 @@ struct TimeAxisView: View {
     }
 }
 
+
 // String extension for nilIfEmpty
+// ... (Unchanged)
 extension String {
     func nilIfEmpty() -> String? {
         let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
