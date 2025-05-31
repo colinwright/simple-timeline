@@ -3,6 +3,12 @@
 import SwiftUI
 import CoreData
 
+// Ensure NotificationNames.swift with .navigateToInternalItem is in your project
+// extension Notification.Name {
+//     static let navigateToInternalItem = Notification.Name("navigateToInternalItem")
+//     static let deselectTimelineItems = Notification.Name("deselectTimelineItems") // Assuming this exists
+// }
+
 enum MainViewSelection {
     case projectHome, characters, wiki, timeline
 }
@@ -18,6 +24,12 @@ struct ContentView: View {
     @State private var activeProject: ProjectItem?
     @State private var selection: MainViewSelection = .projectHome
     @State private var showingSettings = false
+
+    // --- NEW: State for programmatic navigation via internal links ---
+    @State private var navigateToWikiPageID: UUID?
+    @State private var navigateToCharacterID: UUID?
+    // Add navigateToEventID later if needed for linking to events
+    // -------------------------------------------------------------
 
     var body: some View {
         NavigationSplitView {
@@ -62,12 +74,12 @@ struct ContentView: View {
             .padding(.bottom, 20)
             
         } detail: {
-            // UPDATED: The ZStack now has a frame modifier to ensure it fills the entire space.
             ZStack {
-                // This background layer is now guaranteed to be the size of the window's detail area.
+                // This background layer is for the global deselect tap
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        // This notification is for deselecting items in TimelineView or other detail views
                         NotificationCenter.default.post(name: .deselectTimelineItems, object: nil)
                     }
 
@@ -77,9 +89,15 @@ struct ContentView: View {
                     case .projectHome:
                         ProjectHomeView(project: project)
                     case .characters:
-                        CharacterListView(project: project, selection: $selection)
+                        // Pass the binding for programmatic navigation
+                        CharacterListView(project: project,
+                                          selection: $selection,
+                                          itemIDToSelectOnAppear: $navigateToCharacterID)
                     case .wiki:
-                        WikiView(project: project, selection: $selection)
+                        // Pass the binding for programmatic navigation
+                        WikiView(project: project,
+                                 selection: $selection,
+                                 itemIDToSelectOnAppear: $navigateToWikiPageID)
                     case .timeline:
                         TimelineView(project: project, selection: $selection)
                     }
@@ -91,7 +109,7 @@ struct ContentView: View {
                     )
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity) // This is the critical missing piece.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationSplitViewColumnWidth(80)
         .sheet(isPresented: $showingSettings) {
@@ -104,6 +122,17 @@ struct ContentView: View {
             .padding()
             .frame(minWidth: 400, minHeight: 300)
         }
+        // --- NEW: Listen for internal navigation requests ---
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToInternalItem)) { notification in
+            guard let userInfo = notification.userInfo,
+                  let urlString = userInfo["urlString"] as? String,
+                  let url = URL(string: urlString) else {
+                print("ContentView: Received navigateToInternalItem notification with invalid or missing userInfo.")
+                return
+            }
+            handleInternalNavigation(url: url)
+        }
+        // --------------------------------------------------
     }
     
     @ViewBuilder
@@ -144,4 +173,47 @@ struct ContentView: View {
             }
         }
     }
+
+    // --- NEW: Method to handle internal link navigation ---
+    private func handleInternalNavigation(url: URL) {
+        guard url.scheme == "simpletl", let host = url.host else {
+            print("ContentView: Invalid internal URL scheme or host: \(url.absoluteString)")
+            return
+        }
+        
+        let itemIDString = url.lastPathComponent
+        guard let itemUUID = UUID(uuidString: itemIDString) else {
+            print("ContentView: Could not parse UUID from internal URL: \(url.absoluteString)")
+            return
+        }
+
+        // Ensure a project is active; internal links are project-specific.
+        guard activeProject != nil else {
+            print("ContentView: Cannot navigate internally, no active project.")
+            // Potentially, you could try to find the project that contains this item if your
+            // data model allowed items to exist without an active project context, but that adds complexity.
+            return
+        }
+
+        // Reset navigation states before setting a new one to avoid conflicts
+        // if selection doesn't change but target ID does.
+        navigateToWikiPageID = nil
+        navigateToCharacterID = nil
+        // navigateToEventID = nil // For future
+
+        switch host {
+        case "wikipage":
+            print("ContentView: Navigating to Wiki Page ID: \(itemUUID)")
+            selection = .wiki // Switch to the Wiki tab
+            navigateToWikiPageID = itemUUID // Tell WikiView which page to select
+        case "character":
+            print("ContentView: Navigating to Character ID: \(itemUUID)")
+            selection = .characters // Switch to the Characters tab
+            navigateToCharacterID = itemUUID // Tell CharacterListView which character to select
+        // Add "event" case here for future Event linking
+        default:
+            print("ContentView: Unknown internal link host: \(host) in URL: \(url.absoluteString)")
+        }
+    }
+    // -----------------------------------------------------
 }

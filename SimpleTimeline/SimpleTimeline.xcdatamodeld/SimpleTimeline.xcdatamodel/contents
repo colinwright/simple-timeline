@@ -11,15 +11,34 @@
         <relationship name="project" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="characterArcs" inverseEntity="ProjectItem"/>
         <relationship name="startEvent" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="EventItem" inverseName="arcsStarted" inverseEntity="EventItem"/>
     </entity>
+    <entity name="CharacterAttributeItem" representedClassName="CharacterAttributeItem" syncable="YES" codeGenerationType="class">
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayOrder" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="value" optional="YES" attributeType="String"/>
+        <relationship name="character" maxCount="1" deletionRule="Nullify" destinationEntity="CharacterItem" inverseName="attributes" inverseEntity="CharacterItem"/>
+    </entity>
+    <entity name="CharacterImageItem" representedClassName="CharacterImageItem" syncable="YES" codeGenerationType="class">
+        <attribute name="caption" optional="YES" attributeType="String"/>
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayOrder" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="imageData" attributeType="Binary"/>
+        <relationship name="character" maxCount="1" deletionRule="Nullify" destinationEntity="CharacterItem" inverseName="images" inverseEntity="CharacterItem"/>
+    </entity>
     <entity name="CharacterItem" representedClassName="CharacterItem" syncable="YES" codeGenerationType="class">
-        <attribute name="characterDescription" optional="YES" attributeType="String"/>
         <attribute name="colorHex" optional="YES" attributeType="String"/>
         <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="descriptionRTFData" optional="YES" attributeType="Binary"/>
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="name" attributeType="String"/>
         <relationship name="arcs" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CharacterArcItem" inverseName="character" inverseEntity="CharacterArcItem"/>
+        <relationship name="attributes" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CharacterAttributeItem" inverseName="character" inverseEntity="CharacterAttributeItem"/>
         <relationship name="events" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="EventItem" inverseName="participatingCharacters" inverseEntity="EventItem"/>
+        <relationship name="images" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CharacterImageItem" inverseName="character" inverseEntity="CharacterImageItem"/>
         <relationship name="project" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="characters" inverseEntity="ProjectItem"/>
+        <relationship name="relatedLinks" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="RelatedLinkItem" inverseName="character" inverseEntity="RelatedLinkItem"/>
     </entity>
     <entity name="CustomFieldDefinitionItem" representedClassName="CustomFieldDefinitionItem" syncable="YES" codeGenerationType="class">
         <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
@@ -58,6 +77,15 @@
         <relationship name="events" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="EventItem" inverseName="project" inverseEntity="EventItem"/>
         <relationship name="wikiPages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="WikiPageItem" inverseName="project" inverseEntity="WikiPageItem"/>
     </entity>
+    <entity name="RelatedLinkItem" representedClassName="RelatedLinkItem" syncable="YES" codeGenerationType="class">
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayOrder" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="title" optional="YES" attributeType="String"/>
+        <attribute name="urlString" attributeType="String"/>
+        <relationship name="character" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="CharacterItem" inverseName="relatedLinks" inverseEntity="CharacterItem"/>
+        <relationship name="wikiPage" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="WikiPageItem" inverseName="relatedLinks" inverseEntity="WikiPageItem"/>
+    </entity>
     <entity name="WikiPageAttributeItem" representedClassName="WikiPageAttributeItem" syncable="YES" codeGenerationType="class">
         <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="displayOrder" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
@@ -66,6 +94,14 @@
         <attribute name="value" optional="YES" attributeType="String"/>
         <relationship name="wikiPage" maxCount="1" deletionRule="Nullify" destinationEntity="WikiPageItem" inverseName="attributes" inverseEntity="WikiPageItem"/>
     </entity>
+    <entity name="WikiPageImageItem" representedClassName="WikiPageImageItem" syncable="YES" codeGenerationType="class">
+        <attribute name="caption" optional="YES" attributeType="String"/>
+        <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayOrder" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="imageData" attributeType="Binary"/>
+        <relationship name="wikiPage" maxCount="1" deletionRule="Nullify" destinationEntity="WikiPageItem" inverseName="images" inverseEntity="WikiPageItem"/>
+    </entity>
     <entity name="WikiPageItem" representedClassName="WikiPageItem" syncable="YES" codeGenerationType="class">
         <attribute name="contentRTFData" optional="YES" attributeType="Binary"/>
         <attribute name="creationDate" attributeType="Date" usesScalarValueType="NO"/>
@@ -73,6 +109,8 @@
         <attribute name="lastModifiedDate" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="title" attributeType="String"/>
         <relationship name="attributes" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="WikiPageAttributeItem" inverseName="wikiPage" inverseEntity="WikiPageAttributeItem"/>
+        <relationship name="images" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="WikiPageImageItem" inverseName="wikiPage" inverseEntity="WikiPageImageItem"/>
         <relationship name="project" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectItem" inverseName="wikiPages" inverseEntity="ProjectItem"/>
+        <relationship name="relatedLinks" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="RelatedLinkItem" inverseName="wikiPage" inverseEntity="RelatedLinkItem"/>
     </entity>
 </model>

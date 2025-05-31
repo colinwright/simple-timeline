@@ -3,135 +3,187 @@
 import SwiftUI
 import AppKit
 
-// The Coordinator will handle delegate methods and actions.
+// Ensure NotificationNames.swift has:
+// extension Notification.Name {
+//     static let navigateToInternalItem = Notification.Name("navigateToInternalItem")
+// }
+
 class RichTextCoordinator: NSObject, NSTextViewDelegate, ObservableObject {
     @Binding var rtfData: Data?
-    weak var textView: NSTextView? // Weak reference to the NSTextView
+    weak var textView: NSTextView?
 
     init(rtfData: Binding<Data?>) {
-        _rtfData = rtfData
+        self._rtfData = rtfData
+        super.init()
+        print("[RichTextCoordinator] Initialized with rtfData binding.")
     }
 
-    // Called when the text changes in the NSTextView
     func textDidChange(_ notification: Notification) {
         guard let textView = notification.object as? NSTextView else { return }
         let contentRange = NSRange(location: 0, length: textView.string.count)
-        self.rtfData = textView.rtf(from: contentRange)
+        let newData = textView.rtf(from: contentRange)
+        // print("[RichTextCoordinator] textDidChange - new data length: \(newData?.count ?? 0)")
+        self.rtfData = newData
     }
 
-    // Action: Toggle Bold
+    private func forceUpdateBindingAfterStyleChange() {
+        guard let textView = textView else {
+            print("[RichTextCoordinator] forceUpdateBindingAfterStyleChange: textView is nil, cannot update binding.")
+            return
+        }
+        let contentRange = NSRange(location: 0, length: textView.string.count)
+        let currentDataFromTextView = textView.rtf(from: contentRange)
+        // print("[RichTextCoordinator] forceUpdateBindingAfterStyleChange - data length: \(currentDataFromTextView?.count ?? 0)")
+        self.rtfData = currentDataFromTextView
+    }
+
     func toggleBold() {
         guard let textView = textView, textView.isEditable else { return }
         let selectedRange = textView.selectedRange()
-        
-        var currentAttributes = selectedRange.length > 0 ?
-            textView.textStorage?.attributes(at: selectedRange.location, effectiveRange: nil) :
-            textView.typingAttributes
-        currentAttributes = currentAttributes ?? textView.typingAttributes
-        
-        let currentFont = currentAttributes?[.font] as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        
-        let fontManager = NSFontManager.shared
-        let newFont: NSFont
-        if currentFont.fontDescriptor.symbolicTraits.contains(.bold) {
-            newFont = fontManager.convert(currentFont, toNotHaveTrait: .boldFontMask)
-        } else {
-            newFont = fontManager.convert(currentFont, toHaveTrait: .boldFontMask)
-        }
-        
-        // Apply to selection or typing attributes
-        if selectedRange.length > 0 {
-            textView.textStorage?.addAttribute(.font, value: newFont, range: selectedRange)
-        } else {
-            var typingAttributes = textView.typingAttributes
-            typingAttributes[.font] = newFont
-            textView.typingAttributes = typingAttributes
-        }
+        let fontToCheck: NSFont? = selectedRange.length > 0 ? textView.textStorage?.attribute(.font, at: selectedRange.location, effectiveRange: nil) as? NSFont : textView.typingAttributes[.font] as? NSFont
+        let currentFont = fontToCheck ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let newFont: NSFont = currentFont.fontDescriptor.symbolicTraits.contains(.bold) ? NSFontManager.shared.convert(currentFont, toNotHaveTrait: .boldFontMask) : NSFontManager.shared.convert(currentFont, toHaveTrait: .boldFontMask)
+        if selectedRange.length > 0 { textView.textStorage?.addAttribute(.font, value: newFont, range: selectedRange) }
+        else { var attrs = textView.typingAttributes; attrs[.font] = newFont; textView.typingAttributes = attrs }
+        forceUpdateBindingAfterStyleChange()
     }
 
-    // Action: Toggle Italic
     func toggleItalic() {
         guard let textView = textView, textView.isEditable else { return }
         let selectedRange = textView.selectedRange()
-
-        var currentAttributes = selectedRange.length > 0 ?
-            textView.textStorage?.attributes(at: selectedRange.location, effectiveRange: nil) :
-            textView.typingAttributes
-        currentAttributes = currentAttributes ?? textView.typingAttributes
-        
-        let currentFont = currentAttributes?[.font] as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-
-        let fontManager = NSFontManager.shared
-        let newFont: NSFont
-        if currentFont.fontDescriptor.symbolicTraits.contains(.italic) {
-            newFont = fontManager.convert(currentFont, toNotHaveTrait: .italicFontMask)
-        } else {
-            newFont = fontManager.convert(currentFont, toHaveTrait: .italicFontMask)
-        }
-        
-        if selectedRange.length > 0 {
-            textView.textStorage?.addAttribute(.font, value: newFont, range: selectedRange)
-        } else {
-            var typingAttributes = textView.typingAttributes
-            typingAttributes[.font] = newFont
-            textView.typingAttributes = typingAttributes
-        }
+        let fontToCheck: NSFont? = selectedRange.length > 0 ? textView.textStorage?.attribute(.font, at: selectedRange.location, effectiveRange: nil) as? NSFont : textView.typingAttributes[.font] as? NSFont
+        let currentFont = fontToCheck ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let newFont: NSFont = currentFont.fontDescriptor.symbolicTraits.contains(.italic) ? NSFontManager.shared.convert(currentFont, toNotHaveTrait: .italicFontMask) : NSFontManager.shared.convert(currentFont, toHaveTrait: .italicFontMask)
+        if selectedRange.length > 0 { textView.textStorage?.addAttribute(.font, value: newFont, range: selectedRange) }
+        else { var attrs = textView.typingAttributes; attrs[.font] = newFont; textView.typingAttributes = attrs }
+        forceUpdateBindingAfterStyleChange()
     }
     
-    // UPDATED: Implement Link Action
     func addLink(urlString: String) {
-        guard let textView = textView, textView.isEditable else { return }
-        let selectedRange = textView.selectedRange()
-
-        // Ensure the URL string is valid and can be converted to a URL
-        var properURLString = urlString
-        if !properURLString.hasPrefix("http://") && !properURLString.hasPrefix("https://") {
-            properURLString = "https://" + properURLString
-        }
-        
-        guard let url = URL(string: properURLString) else {
-            print("Invalid URL string: \(properURLString)")
-            // Optionally, show an alert to the user here
+        guard let textView = textView, textView.isEditable else {
+            print("[RichTextCoordinator] addLink: textView is nil or not editable.")
             return
         }
-        
+        let selectedRange = textView.selectedRange()
+        print("[RichTextCoordinator] addLink: Called with urlString '\(urlString)', selectedRange: location \(selectedRange.location), length \(selectedRange.length)")
+
         if selectedRange.length > 0 {
-            // Apply the link attribute to the selected text
-            textView.textStorage?.addAttribute(.link, value: url, range: selectedRange)
-            // Optionally, add styling for the link (e.g., blue color, underline)
-            textView.textStorage?.addAttribute(.foregroundColor, value: NSColor.linkColor, range: selectedRange)
-            textView.textStorage?.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: selectedRange)
+            var attributes: [NSAttributedString.Key: Any] = [:]
+            if urlString.starts(with: "simpletl://") {
+                attributes[.link] = urlString
+                print("[RichTextCoordinator] addLink: Applying custom scheme link: \(urlString)")
+            } else {
+                var properURLString = urlString
+                if !properURLString.hasPrefix("http://") && !properURLString.hasPrefix("https://") { properURLString = "https://" + properURLString }
+                guard let url = URL(string: properURLString) else {
+                    print("[RichTextCoordinator] addLink: Invalid external URL: \(properURLString)")
+                    let alert = NSAlert(); alert.messageText = "Invalid URL"; alert.informativeText = "The entered URL is not valid: \(properURLString)"; alert.alertStyle = .warning; alert.addButton(withTitle: "OK"); alert.runModal(); return
+                }
+                attributes[.link] = url
+                print("[RichTextCoordinator] addLink: Applying external URL link: \(url.absoluteString)")
+            }
+            attributes[.foregroundColor] = NSColor.linkColor
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             
-            // Trigger a textDidChange notification manually if needed, or rely on NSTextStorage's own mechanisms
-            // Forcing an update to ensure rtfData binding is refreshed:
-            let contentRange = NSRange(location: 0, length: textView.string.count)
-            self.rtfData = textView.rtf(from: contentRange)
+            textView.textStorage?.beginEditing()
+            textView.textStorage?.addAttributes(attributes, range: selectedRange)
+            textView.textStorage?.endEditing()
+
+            // === DIAGNOSTIC PRINT FOR APPLIED ATTRIBUTES ===
+            if let textStorage = textView.textStorage {
+                let attributesApplied = textStorage.attributes(at: selectedRange.location, effectiveRange: nil)
+                print("[RichTextCoordinator] addLink: Attributes actually applied at range \(selectedRange.location), length \(selectedRange.length): \(attributesApplied)")
+                if let linkAttr = attributesApplied[.link] {
+                    print("[RichTextCoordinator] addLink: Verifying .link attribute value: '\(linkAttr)', type: \(type(of: linkAttr))")
+                } else {
+                    print("[RichTextCoordinator] addLink: VERIFICATION FAILED - .link attribute NOT FOUND after applying.")
+                }
+            }
+            // ===============================================
+            forceUpdateBindingAfterStyleChange()
         } else {
-            // If no text is selected, you could insert the URL as linked text.
-            // For this example, we'll require text to be selected.
-            // You could show an alert to the user.
-            let alert = NSAlert()
-            alert.messageText = "Add Link"
-            alert.informativeText = "Please select some text to apply the link to."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            print("Link: Please select text to apply the link to.")
+            print("[RichTextCoordinator] addLink: No text selected to apply link.")
+            let alert = NSAlert(); alert.messageText = "Add Link"; alert.informativeText = "Please select some text to apply the link to."; alert.alertStyle = .informational; alert.addButton(withTitle: "OK"); alert.runModal()
         }
+    }
+
+    func getSelectedString() -> String? {
+        guard let textView = textView, textView.selectedRange().length > 0 else { return nil }
+        return (textView.string as NSString).substring(with: textView.selectedRange())
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        // === DIAGNOSTIC PRINT AT THE VERY START OF THE METHOD ===
+        print("--- [RichTextCoordinator] textView(_:clickedOnLink:at:) CALLED ---")
+        print("Link object raw value: '\(link)'")
+        print("Link object type: \(type(of: link))")
+        print("Character Index: \(charIndex)")
+        // =======================================================
+
+        var urlStringToHandle: String?
+
+        if let url = link as? URL {
+            urlStringToHandle = url.absoluteString
+            print("[RichTextCoordinator] Link is URL object: \(urlStringToHandle ?? "nil")")
+        } else if let str = link as? String {
+            urlStringToHandle = str
+            print("[RichTextCoordinator] Link is String object: \(urlStringToHandle ?? "nil")")
+        } else {
+            print("[RichTextCoordinator] Link is of an unexpected type.")
+        }
+
+        if let finalUrlString = urlStringToHandle, finalUrlString.starts(with: "simpletl://") {
+            print("[RichTextCoordinator] Internal link identified: \(finalUrlString). Posting notification.")
+            NotificationCenter.default.post(name: .navigateToInternalItem,
+                                            object: nil,
+                                            userInfo: ["urlString": finalUrlString])
+            print("[RichTextCoordinator] Returning TRUE (internal link handled).")
+            return true
+        }
+
+        if let url = link as? URL {
+            if ["http", "https"].contains(url.scheme?.lowercased()) {
+                print("[RichTextCoordinator] External http/https URL identified. Letting OS handle. Returning FALSE.")
+                return false
+            }
+        } else if let str = link as? String, let urlFromString = URL(string: str) {
+            if ["http", "https"].contains(urlFromString.scheme?.lowercased()) {
+                print("[RichTextCoordinator] External http/https string link identified. Letting OS handle. Returning FALSE.")
+                return false
+            }
+        }
+        
+        print("[RichTextCoordinator] Link not handled or not recognized. Returning FALSE.")
+        return false
     }
 }
 
-// RichTextEditorView struct remains the same as previously provided
 struct RichTextEditorView: NSViewRepresentable {
     @Binding var rtfData: Data?
-    @ObservedObject var coordinator: RichTextCoordinator
+    // The coordinator is now created and managed by this struct using makeCoordinator()
+    // @ObservedObject var coordinator: RichTextCoordinator // This is no longer passed in
+
+    func makeCoordinator() -> RichTextCoordinator {
+        print("[RichTextEditorView] makeCoordinator CALLED.")
+        return RichTextCoordinator(rtfData: $rtfData)
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
+        print("[RichTextEditorView] makeNSView CALLED.")
+
         let scrollView = NSTextView.scrollableTextView()
         if let nsTextView = scrollView.documentView as? NSTextView {
             
-            nsTextView.delegate = coordinator
-            coordinator.textView = nsTextView
+            // Use the coordinator from the context
+            nsTextView.delegate = context.coordinator
+            context.coordinator.textView = nsTextView  // Give coordinator a reference to its textView
+            
+            print("[RichTextEditorView] makeNSView: Delegate for NSTextView set to: \(String(describing: nsTextView.delegate))")
+            if nsTextView.delegate === context.coordinator {
+                print("[RichTextEditorView] makeNSView: Confirmed NSTextView.delegate is the correct coordinator instance.")
+            } else {
+                print("[RichTextEditorView] makeNSView: WARNING - NSTextView.delegate is NOT correct or is nil.")
+            }
             
             nsTextView.isRichText = true
             nsTextView.allowsImageEditing = false
@@ -141,40 +193,50 @@ struct RichTextEditorView: NSViewRepresentable {
             nsTextView.textColor = NSColor.textColor
             nsTextView.backgroundColor = NSColor.textBackgroundColor
             nsTextView.usesAdaptiveColorMappingForDarkAppearance = true
-
+            nsTextView.isVerticallyResizable = true
+            nsTextView.isHorizontallyResizable = false
+            nsTextView.textContainer?.widthTracksTextView = true
+            nsTextView.allowsUndo = true
+            nsTextView.enabledTextCheckingTypes = NSTextCheckingAllTypes // Ensure links are checked
+            
             if let data = rtfData,
                let attributedString = NSAttributedString(rtf: data, documentAttributes: nil) {
+                print("[RichTextEditorView] makeNSView: Loading initial RTF data (length: \(data.count)).")
                 nsTextView.textStorage?.setAttributedString(attributedString)
             } else {
+                print("[RichTextEditorView] makeNSView: No initial RTF data or failed to create attributed string. Setting empty string.")
                 nsTextView.textStorage?.setAttributedString(NSAttributedString(string: ""))
             }
+        } else {
+            print("[RichTextEditorView] makeNSView: FAILED to get nsTextView from scrollView.")
         }
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        // print("[RichTextEditorView] updateNSView CALLED.") // Can be noisy
         guard let nsTextView = nsView.documentView as? NSTextView,
               let textStorage = nsTextView.textStorage else { return }
-
-        let currentTextViewData = textStorage.rtf(from: NSRange(location: 0, length: textStorage.length), documentAttributes: [:])
         
-        let isFirstResponder = nsTextView.window?.firstResponder == nsTextView.enclosingScrollView?.documentView
+        let isFirstResponder = nsTextView.window?.firstResponder == nsTextView
 
-        // Only update if external data changed AND the view isn't focused/being edited
-        // or if the data is nil and needs to be cleared
-        if (rtfData == nil && !textStorage.string.isEmpty && !isFirstResponder) ||
-           (rtfData != currentTextViewData && !isFirstResponder) {
-            
-            textStorage.beginEditing()
-            if let data = rtfData,
-               let newAttributedString = NSAttributedString(rtf: data, documentAttributes: nil) {
-                textStorage.setAttributedString(newAttributedString)
-            } else {
-                textStorage.setAttributedString(NSAttributedString(string: ""))
+        if !isFirstResponder {
+            let currentDataInTextView = nsTextView.rtf(from: NSRange(location: 0, length: nsTextView.string.count))
+            if rtfData != currentDataInTextView {
+                // print("[RichTextEditorView] updateNSView: External data change detected. Updating view.")
+                textStorage.beginEditing()
+                if let data = rtfData,
+                   let newAttributedString = NSAttributedString(rtf: data, documentAttributes: nil) {
+                    textStorage.setAttributedString(newAttributedString)
+                } else {
+                    textStorage.setAttributedString(NSAttributedString(string: ""))
+                }
+                textStorage.endEditing()
             }
-            textStorage.endEditing()
         }
     }
 }
