@@ -1,8 +1,9 @@
-// EditCharacterView.swift
+// SimpleTimeline/EditCharacterView.swift
 
 import SwiftUI
 import CoreData
 import UniformTypeIdentifiers
+import Combine
 
 struct EditCharacterView: View {
     @ObservedObject var character: CharacterItem
@@ -33,12 +34,12 @@ struct EditCharacterView: View {
     @State private var showingLinkEditorSheet = false
     @State private var linkEditorTitle: String = ""
     @State private var linkEditorURL: String = ""
-    @State private var editingLinkContext: EditingLinkContext?
 
     enum EditingLinkContext {
-        case descriptionLink
+        case descriptionLink(NSRange?) // nil range means adding new, non-nil means editing existing
         case sidebarLink(RelatedLinkItem?)
     }
+    @State private var editingLinkContext: EditingLinkContext?
     
     // Computed Properties for data
     private var characterAttributes: [CharacterAttributeItem] {
@@ -116,12 +117,17 @@ struct EditCharacterView: View {
             if oldChar.id != newChar.id {
                 editableName = newChar.name ?? ""
                 selectedColorName = hexToColorName(newChar.colorHex)
-                // The proxy doesn't hold data, so no need to update it here.
-                // The RichTextEditorView will update itself from its binding.
             } else if !isEditingCharacter {
                  editableName = newChar.name ?? ""
                  selectedColorName = hexToColorName(newChar.colorHex)
             }
+        }
+        .onReceive(descriptionActionProxy.editLinkSubject) { payload in
+            // This will only be triggered if ClickableLinkTextView is re-enabled in RichTextEditorView
+            self.editingLinkContext = .descriptionLink(payload.range)
+            self.linkEditorTitle = payload.text
+            self.linkEditorURL = payload.url
+            self.showingLinkEditorSheet = true
         }
         .sheet(isPresented: $showingLinkEditorSheet) {
             if let project = character.project {
@@ -130,14 +136,19 @@ struct EditCharacterView: View {
                     linkUrlString: $linkEditorURL,
                     project: project,
                     isEditingExistingLink: {
+                        if case .descriptionLink(let range) = editingLinkContext { return range != nil }
                         if case .sidebarLink(let item) = editingLinkContext { return item != nil }
                         return false
                     }(),
                     onSave: { title, urlString in
                         guard let context = editingLinkContext else { return }
                         switch context {
-                        case .descriptionLink:
-                            descriptionActionProxy.addLink(urlString: urlString)
+                        case .descriptionLink(let range):
+                            if let range = range {
+                                descriptionActionProxy.updateLink(at: range, with: urlString)
+                            } else {
+                                descriptionActionProxy.addLink(urlString: urlString)
+                            }
                         case .sidebarLink(let existingLink):
                             if let linkToUpdate = existingLink {
                                 updateRelatedLink(linkToUpdate, title: title, urlString: urlString)
@@ -147,13 +158,6 @@ struct EditCharacterView: View {
                         }
                     }
                 )
-            } else {
-                 VStack(spacing: 20) {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundColor(.orange)
-                    Text("Cannot Add/Edit Link").font(.headline)
-                    Text("This character is not currently associated with a project.").font(.callout).multilineTextAlignment(.center).padding(.horizontal)
-                    Button("OK") { showingLinkEditorSheet = false }.padding(.top)
-                }.padding().frame(minWidth: 300, idealWidth: 400, minHeight: 200)
             }
         }
         .fileImporter(isPresented: $showingImageImporter, allowedContentTypes: [.image], allowsMultipleSelection: false) { result in
@@ -194,11 +198,19 @@ struct EditCharacterView: View {
                 Button(action: { descriptionActionProxy.toggleBold() }) { Image(systemName: "bold") }
                 Button(action: { descriptionActionProxy.toggleItalic() }) { Image(systemName: "italic") }
                 Button(action: {
-                    editingLinkContext = .descriptionLink
-                    linkEditorTitle = descriptionActionProxy.getSelectedString() ?? ""
-                    linkEditorURL = ""
-                    showingLinkEditorSheet = true
-                }) { Image(systemName: "link") }
+                    if descriptionActionProxy.isLinkSelected {
+                        descriptionActionProxy.removeLink()
+                    } else {
+                        self.editingLinkContext = .descriptionLink(nil)
+                        self.linkEditorTitle = descriptionActionProxy.getSelectedString() ?? ""
+                        self.linkEditorURL = ""
+                        self.showingLinkEditorSheet = true
+                    }
+                }) {
+                    Image(systemName: descriptionActionProxy.isLinkSelected ? "link.slash" : "link")
+                }
+                .help(descriptionActionProxy.isLinkSelected ? "Remove Link" : "Add Link")
+                .disabled(!descriptionActionProxy.isLinkSelected && (descriptionActionProxy.getSelectedString() ?? "").isEmpty)
                 Spacer()
             }
             .padding(.horizontal).padding(.bottom, 8)
@@ -215,7 +227,7 @@ struct EditCharacterView: View {
     }
 
     private var leftColumnView: some View {
-        ScrollView {
+        ScrollView { // Outer ScrollView for the entire left column
             VStack(alignment: .leading, spacing: 15) {
                 nameSection
                 colorSection
@@ -257,34 +269,17 @@ struct EditCharacterView: View {
     private var descriptionSection: some View {
         VStack(alignment: .leading) {
             fieldLabel("Description")
-            if isEditingCharacter {
-                RichTextEditorView(
-                    rtfData: $character.descriptionRTFData,
-                    proxy: descriptionActionProxy,
-                    isEditable: true
-                )
-                .frame(minHeight: 150, idealHeight: 250, maxHeight: 400)
-                .border(Color.gray.opacity(0.2))
-            } else {
-                // Remove the outer ScrollView and apply the frame directly
-                // to RichTextEditorView. Its internal NSScrollView will handle scrolling.
-                RichTextEditorView(
-                    rtfData: .constant(character.descriptionRTFData),
-                    proxy: descriptionActionProxy,
-                    isEditable: false
-                )
-                .frame(minHeight: 150, idealHeight: 250, maxHeight: 400) // Apply frame directly
-                .padding(.top, 2) // Original padding
-                // You might want to add horizontal padding directly here if needed,
-                // e.g., .padding(.horizontal, 5)
-                // or apply it to the parent VStack of descriptionSection.
-                // For now, let's test with just the frame.
-            }
+            RichTextEditorView(
+                rtfData: $character.descriptionRTFData,
+                proxy: descriptionActionProxy,
+                isEditable: isEditingCharacter
+            )
+            // Ensuring a constrained, but flexible height
+            .frame(minHeight: 150, idealHeight: 250, maxHeight: 400)
+            .border(isEditingCharacter ? Color(NSColor.separatorColor) : Color.clear)
         }
     }
 
-    // The rightColumnView and its sub-views do not need any changes.
-    // They are included here for completeness of the file.
     private var rightColumnView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
@@ -345,26 +340,16 @@ struct EditCharacterView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         if isEditingCharacter {
                             HStack {
-                                TextField("Attribute Name", text: Binding(
-                                    get: { attribute.name ?? "" },
-                                    set: { newValue in
-                                        undoManager?.registerUndo(withTarget: attribute) { t in t.name = attribute.name }
-                                        attribute.name = newValue
-                                    }), prompt: Text("Name"))
-                                .textFieldStyle(PlainTextFieldStyle())
+                                TextField("Attribute Name", text: Binding(get: { attribute.name ?? "" }, set: { attribute.name = $0 }), prompt: Text("Name"))
+                                    .textFieldStyle(PlainTextFieldStyle())
                                 Spacer()
                                 Button(action: { deleteCharacterAttribute(attribute) }) {
                                     Image(systemName: "minus.circle.fill").foregroundColor(.red)
                                 }.buttonStyle(BorderlessButtonStyle())
                             }
-                            TextField("Value", text: Binding(
-                                get: { attribute.value ?? "" },
-                                set: { newValue in
-                                    undoManager?.registerUndo(withTarget: attribute) { t in t.value = attribute.value }
-                                    attribute.value = newValue
-                                }), prompt: Text("Value"))
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .font(.system(size: NSFont.systemFontSize(for: .small)))
+                            TextField("Value", text: Binding(get: { attribute.value ?? "" }, set: { attribute.value = $0 }), prompt: Text("Value"))
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: NSFont.systemFontSize(for: .small)))
                         } else {
                             Text(attribute.name ?? "Unnamed Attribute").fontWeight(.semibold)
                             Text(attribute.value ?? "-").font(.subheadline)
@@ -389,202 +374,118 @@ struct EditCharacterView: View {
                Text("No related links added.").font(.caption).foregroundColor(.gray)
             } else {
                ForEach(characterRelatedLinks) { linkItem in
-                   HStack {
-                       VStack(alignment: .leading) {
-                           if let urlString = linkItem.urlString {
-                               Button(action: {
-                                   NotificationCenter.default.post(name: .navigateToInternalItem, object: nil, userInfo: ["urlString": urlString])
-                               }) {
-                                   Text(linkItem.title ?? urlString).lineLimit(1)
-                                       .foregroundColor(URL(string: urlString)?.scheme == "simpletl" ? .accentColor : .blue)
-                                       .if(URL(string: urlString)?.scheme == "simpletl" || URL(string: urlString)?.scheme == "http" || URL(string: urlString)?.scheme == "https") { view in
-                                           view.underline()
-                                       }
-                               }
-                               .buttonStyle(PlainButtonStyle())
-                               if let title = linkItem.title, !title.isEmpty, title != urlString, !(urlString.starts(with: "simpletl://")) {
-                                   Text(urlString).font(.caption2).foregroundColor(.gray).lineLimit(1)
-                               }
-                           } else {
-                               Text(linkItem.title ?? "Invalid Link Data").foregroundColor(.red.opacity(0.7))
-                           }
-                       }
-                       Spacer()
-                       if isEditingCharacter {
-                           Button(action: {
-                               editingLinkContext = .sidebarLink(linkItem)
-                               linkEditorTitle = linkItem.title ?? ""
-                               linkEditorURL = linkItem.urlString ?? ""
-                               showingLinkEditorSheet = true
-                           }) { Image(systemName: "pencil.circle.fill") }.buttonStyle(BorderlessButtonStyle())
-                           Button(action: { deleteRelatedLink(linkItem) }) {
-                               Image(systemName: "minus.circle.fill").foregroundColor(.red)
-                           }.buttonStyle(BorderlessButtonStyle())
-                       }
-                   }
-                   .padding(.vertical, 2)
+                   relatedLinkRowView(for: linkItem)
                    if linkItem != characterRelatedLinks.last || isEditingCharacter { Divider() }
                }
             }
             if isEditingCharacter {
                Button(action: {
-                   editingLinkContext = .sidebarLink(nil)
-                   linkEditorTitle = ""
-                   linkEditorURL = ""
-                   showingLinkEditorSheet = true
+                   editingLinkContext = .sidebarLink(nil); linkEditorTitle = ""; linkEditorURL = ""; showingLinkEditorSheet = true
                }) { Label("Add Related Link", systemImage: "link.badge.plus") }.padding(.top, 8)
             }
         }
+    }
+    
+    @ViewBuilder
+    private func relatedLinkRowView(for linkItem: RelatedLinkItem) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                if let urlString = linkItem.urlString {
+                    let url = URL(string: urlString)
+                    let isInternal = url?.scheme == "simpletl"
+                    let isWebLink = url?.scheme == "http" || url?.scheme == "https"
+                    Button(action: {
+                        NotificationCenter.default.post(name: .navigateToInternalItem, object: nil, userInfo: ["urlString": urlString])
+                    }) {
+                        Text(linkItem.title ?? urlString).lineLimit(1)
+                            .foregroundColor(isInternal ? .accentColor : .blue)
+                            .if(isInternal || isWebLink) { $0.underline() }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    if let title = linkItem.title, !title.isEmpty, title != urlString, !isInternal {
+                        Text(urlString).font(.caption2).foregroundColor(.gray).lineLimit(1)
+                    }
+                } else {
+                    Text(linkItem.title ?? "Invalid Link Data").foregroundColor(.red.opacity(0.7))
+                }
+            }
+            Spacer()
+            if isEditingCharacter {
+                Button(action: {
+                    editingLinkContext = .sidebarLink(linkItem); linkEditorTitle = linkItem.title ?? ""; linkEditorURL = linkItem.urlString ?? ""; showingLinkEditorSheet = true
+                }) { Image(systemName: "pencil.circle.fill") }.buttonStyle(BorderlessButtonStyle())
+                Button(action: { deleteRelatedLink(linkItem) }) {
+                    Image(systemName: "minus.circle.fill").foregroundColor(.red)
+                }.buttonStyle(BorderlessButtonStyle())
+            }
+        }
+        .padding(.vertical, 2)
     }
     
     // MARK: - Data Persistence Methods
     private func saveCharacterChanges() {
         let trimmedName = editableName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedName.isEmpty && character.name != trimmedName { character.name = trimmedName }
-        
         let newHex = EditCharacterView.colorToHex(colorOptions[selectedColorName] ?? .gray)
         if character.colorHex != newHex { character.colorHex = newHex }
-        
         if viewContext.hasChanges {
-            do {
-                try viewContext.save(); undoManager?.removeAllActions()
-            } catch {
-                let nsError = error as NSError; print("Error saving character: \(nsError), \(nsError.userInfo)")
-            }
+            do { try viewContext.save(); undoManager?.removeAllActions() }
+            catch { let nsError = error as NSError; print("Error saving character: \(nsError), \(nsError.userInfo)") }
         }
     }
-
     private func addCharacterAttribute() {
         withAnimation {
-            let newAttr = CharacterAttributeItem(context: viewContext)
-            newAttr.id = UUID(); newAttr.name = "New Attribute"; newAttr.value = ""; newAttr.creationDate = Date(); newAttr.displayOrder = Int16(characterAttributes.count)
+            let newAttr = CharacterAttributeItem(context: viewContext); newAttr.id = UUID(); newAttr.name = "New Attribute"; newAttr.value = ""; newAttr.creationDate = Date(); newAttr.displayOrder = Int16(characterAttributes.count)
             character.addToAttributes(newAttr)
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { tc in tc.removeFromAttributes(newAttr); if newAttr.managedObjectContext != nil { viewContext.delete(newAttr) } }
-            } catch {
-                print("Failed to save context after adding attribute: \(error)")
-                character.removeFromAttributes(newAttr); viewContext.delete(newAttr)
-            }
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { tc in tc.removeFromAttributes(newAttr); if newAttr.managedObjectContext != nil { viewContext.delete(newAttr) } } }
+            catch { print("Failed to save context after adding attribute: \(error)"); character.removeFromAttributes(newAttr); viewContext.delete(newAttr) }
         }
     }
-
     private func deleteCharacterAttribute(_ attribute: CharacterAttributeItem) {
         withAnimation {
-            let (n,v,o,d,id) = (attribute.name,attribute.value,attribute.displayOrder,attribute.creationDate,attribute.id)
+            let (name, value, order, date, id) = (attribute.name, attribute.value, attribute.displayOrder, attribute.creationDate, attribute.id)
             character.removeFromAttributes(attribute); viewContext.delete(attribute)
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { tc in
-                    let ra = CharacterAttributeItem(context: viewContext); ra.id=id;ra.name=n;ra.value=v;ra.displayOrder=o;ra.creationDate=d; tc.addToAttributes(ra)
-                }
-            } catch { print("Failed to save context after deleting attribute: \(error)") }
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { tc in let restoredAttr = CharacterAttributeItem(context: viewContext); restoredAttr.id = id; restoredAttr.name = name; restoredAttr.value = value; restoredAttr.displayOrder = order; restoredAttr.creationDate = date; tc.addToAttributes(restoredAttr) } }
+            catch { print("Failed to save context after deleting attribute: \(error)") }
         }
     }
-
     private func addCharacterImage(imageData: Data) {
         withAnimation {
-            let newImageItem = CharacterImageItem(context: viewContext)
-            newImageItem.id = UUID(); newImageItem.imageData = imageData; newImageItem.creationDate = Date(); newImageItem.displayOrder = Int16(characterImages.count)
+            let newImageItem = CharacterImageItem(context: viewContext); newImageItem.id = UUID(); newImageItem.imageData = imageData; newImageItem.creationDate = Date(); newImageItem.displayOrder = Int16(characterImages.count)
             character.addToImages(newImageItem)
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { tc in tc.removeFromImages(newImageItem); if newImageItem.managedObjectContext != nil { viewContext.delete(newImageItem) } }
-            } catch {
-                print("Failed to save context after adding image: \(error)")
-                character.removeFromImages(newImageItem); viewContext.delete(newImageItem)
-            }
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { tc in tc.removeFromImages(newImageItem); if newImageItem.managedObjectContext != nil { viewContext.delete(newImageItem) } } }
+            catch { print("Failed to save context after adding image: \(error)"); character.removeFromImages(newImageItem); viewContext.delete(newImageItem) }
         }
     }
-
     private func deleteCharacterImage(_ imageItem: CharacterImageItem) {
         withAnimation {
-            let (id,dat,crd,ord) = (imageItem.id,imageItem.imageData,imageItem.creationDate,imageItem.displayOrder)
+            let (id, data, createDate, order) = (imageItem.id, imageItem.imageData, imageItem.creationDate, imageItem.displayOrder)
             character.removeFromImages(imageItem); viewContext.delete(imageItem)
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { tc in
-                    let ri = CharacterImageItem(context: viewContext); ri.id=id;ri.imageData=dat;ri.creationDate=crd;ri.displayOrder=ord; tc.addToImages(ri)
-                }
-            } catch { print("Failed to save context after deleting image: \(error)") }
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { tc in let restoredImage = CharacterImageItem(context: viewContext); restoredImage.id = id; restoredImage.imageData = data; restoredImage.creationDate = createDate; restoredImage.displayOrder = order; tc.addToImages(restoredImage) } }
+            catch { print("Failed to save context after deleting image: \(error)") }
         }
     }
-    
     private func addRelatedLink(title: String?, urlString: String) {
         withAnimation {
-            let newLink = RelatedLinkItem(context: viewContext)
-            newLink.id = UUID()
-            newLink.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty()
-            newLink.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-            newLink.creationDate = Date()
-            newLink.displayOrder = Int16(characterRelatedLinks.count)
-            newLink.character = character
-            
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { tc in
-                    if newLink.managedObjectContext != nil { viewContext.delete(newLink) }
-                }
-            } catch {
-                print("Failed to save context after adding related link: \(error)")
-                if newLink.managedObjectContext != nil { viewContext.delete(newLink) }
-            }
+            let newLink = RelatedLinkItem(context: viewContext); newLink.id = UUID(); newLink.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty(); newLink.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines); newLink.creationDate = Date(); newLink.displayOrder = Int16(characterRelatedLinks.count); newLink.character = character
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { tc in if newLink.managedObjectContext != nil { viewContext.delete(newLink) } } }
+            catch { print("Failed to save context after adding related link: \(error)"); if newLink.managedObjectContext != nil { viewContext.delete(newLink) } }
         }
     }
-
     private func updateRelatedLink(_ linkItem: RelatedLinkItem, title: String?, urlString: String) {
         withAnimation {
             let oldTitle = linkItem.title; let oldUrlString = linkItem.urlString
-            
-            linkItem.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty()
-            linkItem.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: linkItem) { tl in
-                    tl.title = oldTitle
-                    tl.urlString = oldUrlString
-                }
-            } catch {
-                print("Failed to save context after updating related link: \(error)")
-                linkItem.title = oldTitle; linkItem.urlString = oldUrlString
-            }
+            linkItem.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty(); linkItem.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: linkItem) { tl in tl.title = oldTitle; tl.urlString = oldUrlString } }
+            catch { print("Failed to save context after updating related link: \(error)"); linkItem.title = oldTitle; linkItem.urlString = oldUrlString }
         }
     }
-
     private func deleteRelatedLink(_ linkItem: RelatedLinkItem) {
         withAnimation {
-            let linkID = linkItem.id
-            let linkTitle = linkItem.title
-            let linkUrl = linkItem.urlString
-            let linkCreationDate = linkItem.creationDate
-            let linkDisplayOrder = linkItem.displayOrder
-            
+            let (id, title, url, createDate, order) = (linkItem.id, linkItem.title, linkItem.urlString, linkItem.creationDate, linkItem.displayOrder)
             viewContext.delete(linkItem)
-            
-            do {
-                try viewContext.save()
-                undoManager?.registerUndo(withTarget: character) { targetCharacter in
-                    let recreatedLink = RelatedLinkItem(context: viewContext)
-                    recreatedLink.id = linkID
-                    recreatedLink.title = linkTitle
-                    recreatedLink.urlString = linkUrl
-                    recreatedLink.creationDate = linkCreationDate
-                    recreatedLink.displayOrder = linkDisplayOrder
-                    recreatedLink.character = targetCharacter
-                }
-            } catch { print("Failed to save context after deleting related link: \(error)") }
-        }
-    }
-}
-
-// Helper View for conditional modifier
-extension View {
-    @ViewBuilder func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
-        if condition {
-            transform(self)
-        } else {
-            self
+            do { try viewContext.save(); undoManager?.registerUndo(withTarget: character) { targetCharacter in let recreatedLink = RelatedLinkItem(context: viewContext); recreatedLink.id = id; recreatedLink.title = title; recreatedLink.urlString = url; recreatedLink.creationDate = createDate; recreatedLink.displayOrder = order; recreatedLink.character = targetCharacter } }
+            catch { print("Failed to save context after deleting related link: \(error)") }
         }
     }
 }

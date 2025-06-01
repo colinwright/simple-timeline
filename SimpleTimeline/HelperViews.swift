@@ -1,5 +1,7 @@
+// SimpleTimeline/HelperViews.swift
+
 import SwiftUI
-import CoreData // Potentially needed if ReadOnlyRichTextView uses Core Data types directly, though it takes Data?
+import CoreData
 
 struct ReadOnlyRichTextView: View {
     let rtfData: Data?
@@ -18,7 +20,6 @@ struct ReadOnlyRichTextView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            // You can have slightly different placeholders if you like
             Text("(No content)")
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -26,4 +27,18 @@ struct ReadOnlyRichTextView: View {
     }
 }
 
-// You can add other shared helper views to this file in the future.
+// MARK: - View Extension for Conditional Modifiers
+extension View {
+    /// Applies a modifier to a view only when a given condition is true.
+    /// - Parameters:
+    ///   - condition: The boolean condition to evaluate.
+    ///   - transform: The closure that returns the modified view.
+    /// - Returns: The original view or the modified view.
+    @ViewBuilder func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
+    }
+}

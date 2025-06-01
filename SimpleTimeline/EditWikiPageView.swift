@@ -1,8 +1,9 @@
-// EditWikiPageView.swift
+// SimpleTimeline/EditWikiPageView.swift
 
 import SwiftUI
 import CoreData
 import UniformTypeIdentifiers
+import Combine
 
 struct EditWikiPageView: View {
     @ObservedObject var page: WikiPageItem
@@ -14,13 +15,12 @@ struct EditWikiPageView: View {
     
     @StateObject private var textEditorActionProxy = RichTextActionProxy()
 
-    // Link Editor Sheet State
     @State private var showingLinkEditorSheet = false
     @State private var linkEditorTitle: String = ""
     @State private var linkEditorURL: String = ""
     
     enum LinkEditingContext {
-        case mainDescription
+        case mainDescription(NSRange?)
         case sidebarLink(RelatedLinkItem?)
     }
     @State private var currentLinkEditingContext: LinkEditingContext?
@@ -29,11 +29,8 @@ struct EditWikiPageView: View {
 
     private var sortedRelatedLinks: [RelatedLinkItem] {
         let unsortedLinks = page.relatedLinks as? Set<RelatedLinkItem> ?? []
-        return unsortedLinks.sorted {
-            ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast)
-        }
+        return unsortedLinks.sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
     }
-
     private var wikiPageAttributes: [WikiPageAttributeItem] {
         let unsortedAttributes = page.attributes as? Set<WikiPageAttributeItem> ?? []
         return unsortedAttributes.sorted {
@@ -41,12 +38,9 @@ struct EditWikiPageView: View {
             return ($0.name ?? "") < ($1.name ?? "")
         }
     }
-
     private var wikiPageImages: [WikiPageImageItem] {
         let unsortedImages = page.images as? Set<WikiPageImageItem> ?? []
-        return unsortedImages.sorted {
-            ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast)
-        }
+        return unsortedImages.sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
     }
 
     init(page: WikiPageItem) {
@@ -60,120 +54,39 @@ struct EditWikiPageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack { // Header Bar
-                Spacer()
-                if isEditingPage {
-                    Button("Save Page") { savePageChanges(); isEditingPage = false }
-                    .disabled(editableTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                } else {
-                    Button("Edit Page") {
-                        editableTitle = page.title ?? ""
-                        isEditingPage = true
-                    }
-                }
-            }
-            .padding([.horizontal, .top]).padding(.bottom, 12)
-
-            if isEditingPage { // WYSIWYG Toolbar
-                HStack(spacing: 15) {
-                    Button(action: { textEditorActionProxy.toggleBold() }) { Image(systemName: "bold") }
-                    Button(action: { textEditorActionProxy.toggleItalic() }) { Image(systemName: "italic") }
-                    Button(action: {
-                        currentLinkEditingContext = .mainDescription
-                        linkEditorTitle = textEditorActionProxy.getSelectedString() ?? ""
-                        linkEditorURL = ""
-                        showingLinkEditorSheet = true
-                    }) { Image(systemName: "link") }
-                    Spacer()
-                }
-                .padding(.horizontal).padding(.bottom, 8)
-            }
-            
-            HSplitView {
-                            VStack(alignment: .leading, spacing: 0) { // Left Column (Main Content)
-                                Group {
-                                    if isEditingPage {
-                                        TextField("Page Title", text: $editableTitle, prompt: Text("Enter page title"))
-                                    } else {
-                                        Text(page.title ?? "Untitled Page").textSelection(.enabled)
-                                    }
-                                }
-                                .font(.largeTitle).fontWeight(.bold).textFieldStyle(.plain)
-                                .padding([.horizontal, .top]).padding(.bottom, 10)
-                                
-                                Divider().padding(.horizontal)
-
-                                if isEditingPage {
-                                    RichTextEditorView(
-                                        rtfData: $page.contentRTFData,
-                                        proxy: textEditorActionProxy,
-                                        isEditable: true
-                                    )
-                                    // Allow the editable view to expand fully
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .padding(.top, 5)
-                                } else {
-                                    // Read-only branch:
-                                    // REMOVE the outer SwiftUI ScrollView.
-                                    // Apply flexible frame directly to RichTextEditorView.
-                                    // Its internal NSScrollView will handle scrolling.
-                                    RichTextEditorView(
-                                        rtfData: .constant(page.contentRTFData),
-                                        proxy: textEditorActionProxy,
-                                        isEditable: false
-                                    )
-                                    .padding() // Padding for the text content itself
-                                    // Tell RichTextEditorView to take up all available space.
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                }
-                            }
-                            // This frame on the parent VStack is crucial for HSplitView
-                            .frame(minWidth: 350, idealWidth: 700, maxWidth: .infinity) 
-
-                ScrollView { // Right Column (Sidebar)
-                    VStack(alignment: .leading, spacing: 15) {
-                        Text("Details").font(.title2).fontWeight(.semibold)
-                        Divider()
-                        pageImagesSection        // <-- Now properly implemented
-                        Divider().padding(.vertical, 10)
-                        metadataSection          // <-- Now properly implemented
-                        Divider()
-                        customAttributesSection  // <-- Now properly implemented
-                        Divider().padding(.vertical, 10)
-                        relatedLinksSidebarSection
-                        Spacer()
-                    }.padding()
-                }
-                .frame(width: 320)
-                .background(Color(NSColor.windowBackgroundColor))
-            }
+            headerBar
+            wysiwygToolbar
+            contentSplitView
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onChange(of: page) { oldPage, newPage in
              if oldPage.id != newPage.id { editableTitle = newPage.title ?? "" }
              else if !isEditingPage { editableTitle = newPage.title ?? "" }
         }
+        .onReceive(textEditorActionProxy.editLinkSubject) { payload in
+            // This will only be triggered if ClickableLinkTextView is re-enabled in RichTextEditorView
+            self.currentLinkEditingContext = .mainDescription(payload.range)
+            self.linkEditorTitle = payload.text
+            self.linkEditorURL = payload.url
+            self.showingLinkEditorSheet = true
+        }
         .sheet(isPresented: $showingLinkEditorSheet) {
             if let project = page.project {
-                LinkEditorSheetView(
-                    linkTitle: $linkEditorTitle,
-                    linkUrlString: $linkEditorURL,
-                    project: project,
+                LinkEditorSheetView( linkTitle: $linkEditorTitle, linkUrlString: $linkEditorURL, project: project,
                     isEditingExistingLink: {
+                        if case .mainDescription(let range) = currentLinkEditingContext { return range != nil }
                         if case .sidebarLink(let item) = currentLinkEditingContext { return item != nil }
                         return false
                     }(),
                     onSave: { title, urlString in
                         guard let context = currentLinkEditingContext else { return }
                         switch context {
-                        case .mainDescription:
-                            textEditorActionProxy.addLink(urlString: urlString)
+                        case .mainDescription(let range):
+                            if let range = range { textEditorActionProxy.updateLink(at: range, with: urlString) }
+                            else { textEditorActionProxy.addLink(urlString: urlString) }
                         case .sidebarLink(let existingLink):
-                            if let linkToUpdate = existingLink {
-                                updateSidebarLink(linkToUpdate, title: title, urlString: urlString)
-                            } else {
-                                addSidebarLink(title: title, urlString: urlString)
-                            }
+                            if let linkToUpdate = existingLink { updateSidebarLink(linkToUpdate, title: title, urlString: urlString) }
+                            else { addSidebarLink(title: title, urlString: urlString) }
                         }
                     }
                 )
@@ -193,7 +106,105 @@ struct EditWikiPageView: View {
         }
     }
 
-    // MARK: - Subviews for Sidebar Sections
+    private var headerBar: some View {
+        HStack {
+            Spacer()
+            if isEditingPage {
+                Button("Save Page") { savePageChanges(); isEditingPage = false }.disabled(editableTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } else {
+                Button("Edit Page") { editableTitle = page.title ?? ""; isEditingPage = true }
+            }
+        }
+        .padding([.horizontal, .top]).padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var wysiwygToolbar: some View {
+        if isEditingPage {
+            HStack(spacing: 15) {
+                Button(action: { textEditorActionProxy.toggleBold() }) { Image(systemName: "bold") }
+                Button(action: { textEditorActionProxy.toggleItalic() }) { Image(systemName: "italic") }
+                Button(action: {
+                    if textEditorActionProxy.isLinkSelected { textEditorActionProxy.removeLink() }
+                    else { self.currentLinkEditingContext = .mainDescription(nil); self.linkEditorTitle = textEditorActionProxy.getSelectedString() ?? ""; self.linkEditorURL = ""; self.showingLinkEditorSheet = true }
+                }) {
+                    // Fallback for SF Symbol for older OS compatibility
+                    if #available(macOS 12.0, *) {
+                        Image(systemName: textEditorActionProxy.isLinkSelected ? "link.slash" : "link")
+                    } else {
+                        Image(systemName: "link") // Fallback if link.slash is not available
+                    }
+                }
+                .help(textEditorActionProxy.isLinkSelected ? "Remove Link" : "Add Link")
+                .disabled(!textEditorActionProxy.isLinkSelected && (textEditorActionProxy.getSelectedString() ?? "").isEmpty)
+                Spacer()
+            }
+            .padding(.horizontal).padding(.bottom, 8)
+        }
+    }
+
+    private var contentSplitView: some View {
+        HSplitView {
+            VStack(alignment: .leading, spacing: 0) {
+                Group {
+                    if isEditingPage {
+                        TextField("Page Title", text: $editableTitle, prompt: Text("Enter page title"))
+                    } else {
+                        Text(page.title ?? "Untitled Page").textSelection(.enabled)
+                    }
+                }
+                .font(.largeTitle).fontWeight(.bold).textFieldStyle(.plain)
+                .padding([.horizontal, .top]).padding(.bottom, 10)
+                Divider().padding(.horizontal)
+
+                // --- REVISED STRUCTURE FOR TEXT DISPLAY ---
+                if isEditingPage {
+                    RichTextEditorView(
+                        rtfData: $page.contentRTFData,
+                        proxy: textEditorActionProxy,
+                        isEditable: true
+                    )
+                    // When editing, RichTextEditorView (NSScrollView) manages its scrolling.
+                    // .infinity allows it to take available space in the HSplitView pane.
+                    .frame(minHeight: 200, idealHeight: 400, maxHeight: .infinity)
+                    .padding() // Padding for the editor itself
+                } else {
+                    // In read-only mode, DO NOT wrap in another ScrollView.
+                    // RichTextEditorView is already an NSScrollView.
+                    // Let it expand to fill the available vertical space.
+                    RichTextEditorView(
+                        rtfData: $page.contentRTFData,
+                        proxy: textEditorActionProxy,
+                        isEditable: false
+                    )
+                    // Let it take all available space. Its internal NSScrollView will handle scrolling.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal) // Keep horizontal padding consistent with your original style
+                    // .padding(.top, isEditingPage ? 5 : 0) // This was here, apply if desired for top padding
+                }
+                // --- END REVISED STRUCTURE ---
+            }
+            .frame(minWidth: 350, idealWidth: 700, maxWidth: .infinity) // This VStack takes available width
+
+            ScrollView { // Sidebar
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("Details").font(.title2).fontWeight(.semibold)
+                    Divider()
+                    pageImagesSection
+                    Divider().padding(.vertical, 10)
+                    metadataSection
+                    Divider()
+                    customAttributesSection
+                    Divider().padding(.vertical, 10)
+                    relatedLinksSidebarSection
+                    Spacer()
+                }.padding()
+            }
+            .frame(width: 320).background(Color(NSColor.windowBackgroundColor))
+        }
+    }
+
+    // MARK: - Sidebar Section Views (and relatedLinkRowView helper)
     private var pageImagesSection: some View {
         VStack(alignment: .leading) {
             Text("Page Images").font(.headline)
@@ -227,7 +238,7 @@ struct EditWikiPageView: View {
             }
         }
     }
-
+    
     private var metadataSection: some View {
         Group {
             fieldLabel("Last Modified")
@@ -236,7 +247,7 @@ struct EditWikiPageView: View {
             Text((page.creationDate ?? Date()).formatted(date: .abbreviated, time: .omitted))
         }.padding(.bottom, 5)
     }
-
+    
     private var customAttributesSection: some View {
         VStack(alignment: .leading) {
             Text("Attributes").font(.headline)
@@ -247,26 +258,16 @@ struct EditWikiPageView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         if isEditingPage {
                             HStack {
-                                TextField("Attribute Name", text: Binding(
-                                    get: { attribute.name ?? "" },
-                                    set: { newValue in
-                                        undoManager?.registerUndo(withTarget: attribute) { t in t.name = attribute.name }
-                                        attribute.name = newValue
-                                    }), prompt: Text("Name"))
-                                .textFieldStyle(PlainTextFieldStyle())
+                                TextField("Attribute Name", text: Binding(get: { attribute.name ?? "" }, set: { attribute.name = $0 }), prompt: Text("Name"))
+                                    .textFieldStyle(PlainTextFieldStyle())
                                 Spacer()
                                 Button(action: { deleteWikiPageAttribute(attribute) }) {
                                     Image(systemName: "minus.circle.fill").foregroundColor(.red)
                                 }.buttonStyle(BorderlessButtonStyle())
                             }
-                            TextField("Value", text: Binding(
-                                get: { attribute.value ?? "" },
-                                set: { newValue in
-                                    undoManager?.registerUndo(withTarget: attribute) { t in t.value = attribute.value }
-                                    attribute.value = newValue
-                                }), prompt: Text("Value"))
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .font(.system(size: NSFont.systemFontSize(for: .small)))
+                            TextField("Value", text: Binding(get: { attribute.value ?? "" }, set: { attribute.value = $0 }), prompt: Text("Value"))
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: NSFont.systemFontSize(for: .small)))
                         } else {
                             Text(attribute.name ?? "Unnamed Attribute").fontWeight(.semibold)
                             Text(attribute.value ?? "-").font(.subheadline)
@@ -283,7 +284,7 @@ struct EditWikiPageView: View {
             }
         }
     }
-
+    
     private var relatedLinksSidebarSection: some View {
         VStack(alignment: .leading) {
             Text("Related Links").font(.headline)
@@ -291,42 +292,7 @@ struct EditWikiPageView: View {
                Text("No related links added.").font(.caption).foregroundColor(.gray)
             } else {
                ForEach(sortedRelatedLinks) { linkItem in
-                   HStack {
-                       VStack(alignment: .leading) {
-                           if let urlString = linkItem.urlString {
-                               Button(action: {
-                                   NotificationCenter.default.post(name: .navigateToInternalItem, object: nil, userInfo: ["urlString": urlString])
-                               }) {
-                                   Text(linkItem.title ?? urlString).lineLimit(1)
-                                       .foregroundColor(URL(string: urlString)?.scheme == "simpletl" ? .accentColor : .blue)
-                                       .if(URL(string: urlString)?.scheme == "simpletl" || URL(string: urlString)?.scheme == "http" || URL(string: urlString)?.scheme == "https") { view in
-                                           view.underline()
-                                       }
-                               }
-                               .buttonStyle(PlainButtonStyle())
-                               if let title = linkItem.title, !title.isEmpty, title != urlString, !(urlString.starts(with: "simpletl://")) {
-                                   Text(urlString).font(.caption2).foregroundColor(.gray).lineLimit(1)
-                               }
-                           } else {
-                               Text(linkItem.title ?? "Invalid Link Data").foregroundColor(.red.opacity(0.7))
-                           }
-                       }
-                       Spacer()
-                       if isEditingPage {
-                           Button(action: {
-                               currentLinkEditingContext = .sidebarLink(linkItem)
-                               linkEditorTitle = linkItem.title ?? ""
-                               linkEditorURL = linkItem.urlString ?? ""
-                               showingLinkEditorSheet = true
-                           }) { Image(systemName: "pencil.circle.fill") }.buttonStyle(BorderlessButtonStyle())
-                           Button(action: {
-                               deleteSidebarLink(linkItem)
-                           }) {
-                               Image(systemName: "minus.circle.fill").foregroundColor(.red)
-                           }.buttonStyle(BorderlessButtonStyle())
-                       }
-                   }
-                   .padding(.vertical, 2)
+                   relatedLinkRowView(for: linkItem)
                    if linkItem != sortedRelatedLinks.last || isEditingPage { Divider() }
                }
             }
@@ -340,8 +306,46 @@ struct EditWikiPageView: View {
             }
         }
     }
+    
+    @ViewBuilder
+    private func relatedLinkRowView(for linkItem: RelatedLinkItem) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                if let urlString = linkItem.urlString {
+                    let url = URL(string: urlString)
+                    let isInternal = url?.scheme == "simpletl"
+                    let isWebLink = url?.scheme == "http" || url?.scheme == "https"
+                    Button(action: {
+                        NotificationCenter.default.post(name: .navigateToInternalItem, object: nil, userInfo: ["urlString": urlString])
+                    }) {
+                        Text(linkItem.title ?? urlString).lineLimit(1)
+                            .foregroundColor(isInternal ? .accentColor : .blue)
+                            .if(isInternal || isWebLink) { $0.underline() }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    if let title = linkItem.title, !title.isEmpty, title != urlString, !isInternal {
+                        Text(urlString).font(.caption2).foregroundColor(.gray).lineLimit(1)
+                    }
+                } else {
+                    Text(linkItem.title ?? "Invalid Link Data").foregroundColor(.red.opacity(0.7))
+                }
+            }
+            Spacer()
+            if isEditingPage {
+                Button(action: {
+                    currentLinkEditingContext = .sidebarLink(linkItem)
+                    linkEditorTitle = linkItem.title ?? ""
+                    linkEditorURL = linkItem.urlString ?? ""
+                    showingLinkEditorSheet = true
+                }) { Image(systemName: "pencil.circle.fill") }.buttonStyle(BorderlessButtonStyle())
+                Button(action: { deleteSidebarLink(linkItem) }) {
+                    Image(systemName: "minus.circle.fill").foregroundColor(.red)
+                }.buttonStyle(BorderlessButtonStyle())
+            }
+        }.padding(.vertical, 2)
+    }
 
-    // MARK: - CRUD methods for Sidebar Related Links (Core Data)
+    // MARK: - Data Persistence Methods
     private func addSidebarLink(title: String?, urlString: String) {
         withAnimation {
             let newLink = RelatedLinkItem(context: viewContext)
@@ -349,15 +353,13 @@ struct EditWikiPageView: View {
             newLink.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty()
             newLink.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
             newLink.creationDate = Date()
-            newLink.wikiPage = self.page // Link to the current WikiPageItem
-            // Consider saving context immediately or as part of savePageChanges()
-            // For now, relying on savePageChanges()
+            newLink.wikiPage = self.page
         }
     }
 
     private func updateSidebarLink(_ linkItem: RelatedLinkItem, title: String?, urlString: String) {
         withAnimation {
-            viewContext.perform { // Ensure changes are made on the correct context's queue
+            viewContext.perform {
                 linkItem.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty()
                 linkItem.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
             }
@@ -369,24 +371,24 @@ struct EditWikiPageView: View {
             viewContext.delete(linkItem)
         }
     }
-
-    // MARK: - Data Persistence Methods
+    
     private func savePageChanges() {
         let trimmedTitle = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         var hasMeaningfulChanges = false
+        
         if !trimmedTitle.isEmpty && page.title != trimmedTitle {
             page.title = trimmedTitle
             hasMeaningfulChanges = true
         }
         
         if viewContext.hasChanges || hasMeaningfulChanges {
-             page.lastModifiedDate = Date()
+            page.lastModifiedDate = Date()
         }
 
         if viewContext.hasChanges {
             do {
                 try viewContext.save()
-                undoManager?.removeAllActions()
+                undoManager?.removeAllActions(withTarget: page)
             } catch {
                 let nsError = error as NSError
                 print("Error saving wiki page: \(nsError), \(nsError.userInfo)")
@@ -397,32 +399,37 @@ struct EditWikiPageView: View {
     private func addWikiPageAttribute() {
         withAnimation {
             let newAttr = WikiPageAttributeItem(context: viewContext)
-            newAttr.id = UUID(); newAttr.name = "New Attribute"; newAttr.value = ""; newAttr.creationDate = Date(); newAttr.displayOrder = Int16(wikiPageAttributes.count)
+            newAttr.id = UUID()
+            newAttr.name = "New Attribute"
+            newAttr.value = ""
+            newAttr.creationDate = Date()
+            newAttr.displayOrder = Int16(wikiPageAttributes.count)
             page.addToAttributes(newAttr)
-            // Save happens in savePageChanges
         }
     }
 
     private func deleteWikiPageAttribute(_ attribute: WikiPageAttributeItem) {
         withAnimation {
-            page.removeFromAttributes(attribute); viewContext.delete(attribute)
-             // Save happens in savePageChanges
+            page.removeFromAttributes(attribute)
+            viewContext.delete(attribute)
         }
     }
 
     private func addWikiPageImage(imageData: Data) {
         withAnimation {
             let newImageItem = WikiPageImageItem(context: viewContext)
-            newImageItem.id = UUID(); newImageItem.imageData = imageData; newImageItem.creationDate = Date(); newImageItem.displayOrder = Int16(wikiPageImages.count)
+            newImageItem.id = UUID()
+            newImageItem.imageData = imageData
+            newImageItem.creationDate = Date()
+            newImageItem.displayOrder = Int16(wikiPageImages.count)
             page.addToImages(newImageItem)
-            // Save happens in savePageChanges
         }
     }
 
     private func deleteWikiPageImage(_ imageItem: WikiPageImageItem) {
         withAnimation {
-            page.removeFromImages(imageItem); viewContext.delete(imageItem)
-            // Save happens in savePageChanges
+            page.removeFromImages(imageItem)
+            viewContext.delete(imageItem)
         }
     }
 }
