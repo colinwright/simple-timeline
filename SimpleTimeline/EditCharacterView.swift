@@ -2,7 +2,7 @@
 
 import SwiftUI
 import CoreData
-import UniformTypeIdentifiers // Required for .fileImporter
+import UniformTypeIdentifiers
 
 struct EditCharacterView: View {
     @ObservedObject var character: CharacterItem
@@ -24,12 +24,12 @@ struct EditCharacterView: View {
     @State private var isEditingCharacter: Bool = false
 
     // Rich Text Description State
-    @StateObject private var descriptionEditorCoordinator: RichTextCoordinator
+    @StateObject private var descriptionActionProxy = RichTextActionProxy()
     
     // Image State
     @State private var showingImageImporter = false
     
-    // Link Editing State (Unified for both WYSIWYG and Sidebar Links)
+    // Link Editing State
     @State private var showingLinkEditorSheet = false
     @State private var linkEditorTitle: String = ""
     @State private var linkEditorURL: String = ""
@@ -98,12 +98,6 @@ struct EditCharacterView: View {
             initialColorNameResolved = "Gray"
         }
         _selectedColorName = State(initialValue: initialColorNameResolved)
-        
-        let coordinatorRtfDataBinding = Binding<Data?>(
-            get: { character.descriptionRTFData },
-            set: { newValue in character.descriptionRTFData = newValue }
-        )
-        _descriptionEditorCoordinator = StateObject(wrappedValue: RichTextCoordinator(rtfData: coordinatorRtfDataBinding))
     }
 
     private func fieldLabel(_ label: String) -> some View {
@@ -122,15 +116,15 @@ struct EditCharacterView: View {
             if oldChar.id != newChar.id {
                 editableName = newChar.name ?? ""
                 selectedColorName = hexToColorName(newChar.colorHex)
-                descriptionEditorCoordinator.rtfData = newChar.descriptionRTFData
+                // The proxy doesn't hold data, so no need to update it here.
+                // The RichTextEditorView will update itself from its binding.
             } else if !isEditingCharacter {
                  editableName = newChar.name ?? ""
                  selectedColorName = hexToColorName(newChar.colorHex)
-                 descriptionEditorCoordinator.rtfData = newChar.descriptionRTFData
             }
         }
         .sheet(isPresented: $showingLinkEditorSheet) {
-            if let project = character.project { // Safely unwrap project
+            if let project = character.project {
                 LinkEditorSheetView(
                     linkTitle: $linkEditorTitle,
                     linkUrlString: $linkEditorURL,
@@ -143,7 +137,7 @@ struct EditCharacterView: View {
                         guard let context = editingLinkContext else { return }
                         switch context {
                         case .descriptionLink:
-                            descriptionEditorCoordinator.addLink(urlString: urlString)
+                            descriptionActionProxy.addLink(urlString: urlString)
                         case .sidebarLink(let existingLink):
                             if let linkToUpdate = existingLink {
                                 updateRelatedLink(linkToUpdate, title: title, urlString: urlString)
@@ -154,7 +148,7 @@ struct EditCharacterView: View {
                     }
                 )
             } else {
-                 VStack(spacing: 20) { // Fallback view if project is nil
+                 VStack(spacing: 20) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundColor(.orange)
                     Text("Cannot Add/Edit Link").font(.headline)
                     Text("This character is not currently associated with a project.").font(.callout).multilineTextAlignment(.center).padding(.horizontal)
@@ -186,7 +180,6 @@ struct EditCharacterView: View {
                 Button("Edit Character") {
                     editableName = character.name ?? ""
                     selectedColorName = hexToColorName(character.colorHex)
-                    descriptionEditorCoordinator.rtfData = character.descriptionRTFData
                     isEditingCharacter = true
                 }
             }
@@ -198,11 +191,11 @@ struct EditCharacterView: View {
     private var wysiwygToolbar: some View {
         if isEditingCharacter {
             HStack(spacing: 15) {
-                Button(action: { descriptionEditorCoordinator.toggleBold() }) { Image(systemName: "bold") }
-                Button(action: { descriptionEditorCoordinator.toggleItalic() }) { Image(systemName: "italic") }
+                Button(action: { descriptionActionProxy.toggleBold() }) { Image(systemName: "bold") }
+                Button(action: { descriptionActionProxy.toggleItalic() }) { Image(systemName: "italic") }
                 Button(action: {
                     editingLinkContext = .descriptionLink
-                    linkEditorTitle = descriptionEditorCoordinator.getSelectedString() ?? ""
+                    linkEditorTitle = descriptionActionProxy.getSelectedString() ?? ""
                     linkEditorURL = ""
                     showingLinkEditorSheet = true
                 }) { Image(systemName: "link") }
@@ -265,14 +258,33 @@ struct EditCharacterView: View {
         VStack(alignment: .leading) {
             fieldLabel("Description")
             if isEditingCharacter {
-                RichTextEditorView(rtfData: $character.descriptionRTFData, coordinator: descriptionEditorCoordinator)
-                    .frame(minHeight: 150, idealHeight: 250, maxHeight: 400).border(Color.gray.opacity(0.2))
+                RichTextEditorView(
+                    rtfData: $character.descriptionRTFData,
+                    proxy: descriptionActionProxy,
+                    isEditable: true
+                )
+                .frame(minHeight: 150, idealHeight: 250, maxHeight: 400)
+                .border(Color.gray.opacity(0.2))
             } else {
-                ReadOnlyRichTextView(rtfData: character.descriptionRTFData).padding(.top, 2)
+                // Remove the outer ScrollView and apply the frame directly
+                // to RichTextEditorView. Its internal NSScrollView will handle scrolling.
+                RichTextEditorView(
+                    rtfData: .constant(character.descriptionRTFData),
+                    proxy: descriptionActionProxy,
+                    isEditable: false
+                )
+                .frame(minHeight: 150, idealHeight: 250, maxHeight: 400) // Apply frame directly
+                .padding(.top, 2) // Original padding
+                // You might want to add horizontal padding directly here if needed,
+                // e.g., .padding(.horizontal, 5)
+                // or apply it to the parent VStack of descriptionSection.
+                // For now, let's test with just the frame.
             }
         }
     }
 
+    // The rightColumnView and its sub-views do not need any changes.
+    // They are included here for completeness of the file.
     private var rightColumnView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
@@ -386,7 +398,7 @@ struct EditCharacterView: View {
                                    Text(linkItem.title ?? urlString).lineLimit(1)
                                        .foregroundColor(URL(string: urlString)?.scheme == "simpletl" ? .accentColor : .blue)
                                        .if(URL(string: urlString)?.scheme == "simpletl" || URL(string: urlString)?.scheme == "http" || URL(string: urlString)?.scheme == "https") { view in
-                                           view.underline() // Apply underline for recognizable link types
+                                           view.underline()
                                        }
                                }
                                .buttonStyle(PlainButtonStyle())
@@ -487,7 +499,7 @@ struct EditCharacterView: View {
 
     private func deleteCharacterImage(_ imageItem: CharacterImageItem) {
         withAnimation {
-            let (id,dat,crd,ord) = (imageItem.id,imageItem.imageData,imageItem.creationDate,imageItem.displayOrder) // Assuming caption is not part of undo for simplicity
+            let (id,dat,crd,ord) = (imageItem.id,imageItem.imageData,imageItem.creationDate,imageItem.displayOrder)
             character.removeFromImages(imageItem); viewContext.delete(imageItem)
             do {
                 try viewContext.save()
@@ -506,14 +518,12 @@ struct EditCharacterView: View {
             newLink.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
             newLink.creationDate = Date()
             newLink.displayOrder = Int16(characterRelatedLinks.count)
-            newLink.character = character // Important: Associate with the character
+            newLink.character = character
             
             do {
                 try viewContext.save()
                 undoManager?.registerUndo(withTarget: character) { tc in
                     if newLink.managedObjectContext != nil { viewContext.delete(newLink) }
-                    // Note: Removing from character.relatedLinks might happen automatically due to deletion
-                    // or cascade, but explicit removal in undo can be safer depending on exact model.
                 }
             } catch {
                 print("Failed to save context after adding related link: \(error)")
@@ -550,7 +560,6 @@ struct EditCharacterView: View {
             let linkCreationDate = linkItem.creationDate
             let linkDisplayOrder = linkItem.displayOrder
             
-            // character.removeFromRelatedLinks(linkItem) // Core Data might handle this via inverse or cascade
             viewContext.delete(linkItem)
             
             do {
@@ -562,14 +571,14 @@ struct EditCharacterView: View {
                     recreatedLink.urlString = linkUrl
                     recreatedLink.creationDate = linkCreationDate
                     recreatedLink.displayOrder = linkDisplayOrder
-                    recreatedLink.character = targetCharacter // Re-associate
+                    recreatedLink.character = targetCharacter
                 }
             } catch { print("Failed to save context after deleting related link: \(error)") }
         }
     }
 }
 
-// Helper View for conditional modifier (if needed)
+// Helper View for conditional modifier
 extension View {
     @ViewBuilder func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
         if condition {
